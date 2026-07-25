@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OptiCore PMS — Project Showcase</title>
+<style>
+  :root {
+    --bg: #0a0c10; --bg2: #12161e; --card: #171c26; --border: #232a36;
+    --text: #e6e9ef; --dim: #8b95a7; --accent: #4f9cf9; --green: #4ade80;
+    --amber: #fbbf24; --red: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+  .hero { background: radial-gradient(ellipse at top, rgba(79,156,249,0.15), transparent 60%), var(--bg); padding: 80px 24px 60px; text-align: center; }
+  .hero .logo { font-size: 64px; margin-bottom: 16px; }
+  .hero h1 { font-size: 36px; font-weight: 800; margin-bottom: 12px; background: linear-gradient(135deg, #4f9cf9, #4ade80); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero p { color: var(--dim); font-size: 18px; max-width: 640px; margin: 0 auto 28px; }
+  .badges { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .badge { padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; border: 1px solid var(--border); }
+  .badge.rust { background: rgba(255,165,80,0.1); color: #ffa550; border-color: rgba(255,165,80,0.3); }
+  .badge.tauri { background: rgba(79,156,249,0.1); color: var(--accent); border-color: rgba(79,156,249,0.3); }
+  .badge.react { background: rgba(116,232,255,0.1); color: #74e8ff; border-color: rgba(116,232,255,0.3); }
+  .badge.health { background: rgba(74,222,128,0.1); color: var(--green); border-color: rgba(74,222,128,0.3); }
+  .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+  section { padding: 60px 0; }
+  h2 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  h2 .sub { color: var(--dim); font-size: 16px; font-weight: 400; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-top: 28px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 24px; transition: transform 0.15s, border-color 0.15s; }
+  .card:hover { transform: translateY(-3px); border-color: var(--accent); }
+  .card .icon { font-size: 32px; margin-bottom: 12px; }
+  .card h3 { font-size: 17px; margin-bottom: 6px; }
+  .card p { color: var(--dim); font-size: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 28px; }
+  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; }
+  .stat .v { font-size: 32px; font-weight: 800; color: var(--accent); }
+  .stat .l { font-size: 13px; color: var(--dim); margin-top: 4px; }
+  .arch { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 28px; margin-top: 28px; font-family: ui-monospace, monospace; font-size: 13px; line-height: 1.8; overflow-x: auto; color: var(--dim); }
+  .arch .hi { color: var(--accent); }
+  .arch .ok { color: var(--green); }
+  .arch .warn { color: var(--amber); }
+  .cta { text-align: center; padding: 80px 24px; }
+  .cta a { display: inline-block; padding: 14px 32px; background: var(--accent); color: white; text-decoration: none; border-radius: 10px; font-weight: 600; font-size: 16px; }
+  .cta a:hover { filter: brightness(1.1); }
+  .cta .note { color: var(--dim); font-size: 13px; margin-top: 16px; }
+  footer { text-align: center; padding: 40px 24px; color: var(--dim); font-size: 13px; border-top: 1px solid var(--border); }
+  @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } .hero h1 { font-size: 28px; } }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="logo">👁️</div>
+  <h1>OptiCore — PMS</h1>
+  <p>A modern, secure practice management system built in Rust for an Australian optometry clinic. Patient records, calendar, billing, clinical notes, and analytics — in one fast desktop app.</p>
+  <div class="badges">
+    <span class="badge rust">🦀 Rust backend</span>
+    <span class="badge tauri">🖥️ Tauri desktop</span>
+    <span class="badge react">⚛️ React UI</span>
+    <span class="badge health">🔒 Healthcare-grade auth</span>
+  </div>
+</div>
+
+<div class="container">
+  <section>
+    <h2>What it does <span class="sub">— the full clinic in one app</span></h2>
+    <div class="grid">
+      <div class="card"><div class="icon">📅</div><h3>Interactive Calendar</h3><p>Month/Week/Day views, drag-to-create, drag-to-reschedule, mass-block time ranges, side panel with patient details, payment status on every slot.</p></div>
+      <div class="card"><div class="icon">👥</div><h3>Patient Records</h3><p>Deep patient files: demographics, allergies, OSDI scores, IPL treatments, clinical notes, appointment history, invoices — all on one scrollable page.</p></div>
+      <div class="card"><div class="icon">💳</div><h3>Billing & Checkout</h3><p>Two-column checkout with live invoice calculation, GST, discounts, multiple payment methods, auto-recorded payments.</p></div>
+      <div class="card"><div class="icon">📊</div><h3>Analytics</h3><p>Revenue over time, appointment volume, website traffic by source, conversion rates, KPI dashboards with real charts.</p></div>
+      <div class="card"><div class="icon">📬</div><h3>Unified Messages</h3><p>Email, WhatsApp, and website messages in one inbox — read, archive, link to patients.</p></div>
+      <div class="card"><div class="icon">📥</div><h3>Patient Intake</h3><p>Public details-entry page (no login) → submissions appear in the app for one-click import as patients.</p></div>
+      <div class="card"><div class="icon">🧑‍⚕️</div><h3>User Management</h3><p>Staff accounts with roles (admin, doctor, nurse, receptionist, read-only), create/edit/disable users.</p></div>
+      <div class="card"><div class="icon">🌙</div><h3>Dark Mode</h3><p>Full dark/light theme toggle, persisted. Clean, modern, fast.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>By the numbers</h2>
+    <div class="stats">
+      <div class="stat"><div class="v">Rust</div><div class="l">Backend language</div></div>
+      <div class="stat"><div class="v">15+</div><div class="l">API route groups</div></div>
+      <div class="stat"><div class="v">11</div><div class="l">Database tables</div></div>
+      <div class="stat"><div class="v">0</div><div class="l">Unauthenticated PHI routes</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Architecture <span class="sub">— designed for multi-clinic, multi-PC</span></h2>
+    <div class="arch">
+<span class="warn">Cloudflare (edge)</span>  ─ Worker (public booking gateway) + D1 (queue) + Pages (website)
+        │  HTTPS · shared secret + signed JWT
+<span class="hi">Clinic LAN</span>  ──────────── one always-on <span class="ok">Rust server</span> (Windows Service) holds the authoritative SQLite DB
+        │  LAN HTTP/HTTPS
+   ┌────┴────┬─────────┬──────────┐
+<span class="hi">Tauri apps</span>   Reception  Exam rm   Ashley's PC  ← all share one DB via the server
+    </div>
+  </section>
+
+  <section>
+    <h2>Security & data integrity</h2>
+    <div class="grid">
+      <div class="card"><div class="icon">🔐</div><h3>Argon2 + JWT, always on</h3><p>Every patient-data route requires a valid JWT. No "disabled for demo" backdoors.</p></div>
+      <div class="card"><div class="icon">🛡️</div><h3>Compile-time SQL</h3><p>sqlx checks every query at compile time — the async bugs that broke the original can't happen here.</p></div>
+      <div class="card"><div class="icon">💾</div><h3>5-layer backups</h3><p>WAL → hourly snapshot → LAN replica → encrypted offsite → edge replay. No single point of failure.</p></div>
+    </div>
+  </section>
+</div>
+
+<div class="cta">
+  <h2>Review the live app</h2>
+  <p style="color: var(--dim); max-width: 520px; margin: 12px auto 28px;">The desktop app runs locally. Log in with <strong>admin / admin</strong> to explore the full system.</p>
+  <a href="/">Open the PMS →</a>
+  <div class="note">Or visit <a href="/input" style="color: var(--accent)">/input</a> to see the public patient details form.</div>
+</div>
+
+<footer>
+  Built by fivelidz for OptiCore · Rust + Tauri + React · 2026<br>
+  <a href="https://github.com/chappas01/dry-eye-pms-collab" style="color: var(--accent)">GitHub repo</a>
+</footer>
+
+</body>
+</html>

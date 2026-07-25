@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# SQLite (never commit the DB)
+*.db
+*.db-shm
+*.db-wal
+
+# Node / frontend
+/frontend/node_modules
+/frontend/dist
+
+# Tauri
+/tauri-app/gen
+tsconfig.tsbuildinfo

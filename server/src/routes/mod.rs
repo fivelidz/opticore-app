@@ -1,0 +1,16 @@
+pub mod auth;
+pub mod change_password;
+pub mod patients;
+pub mod patient_detail;
+pub mod appointments;
+pub mod blocked;
+pub mod calendar;
+pub mod clinical;
+pub mod billing;
+pub mod analytics;
+pub mod intake;
+pub mod messages;
+pub mod users;
+pub mod photos;
+pub mod public_api;
+pub mod data_io;
