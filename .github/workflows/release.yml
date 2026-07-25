@@ -17,20 +17,16 @@ jobs:
         include:
           - platform: windows-latest
             args: "--bundles msi,nsis"
-            artifact: "OptiCore_*_x64*.msi"
-            name: "Windows MSI"
+            name: "Windows"
           - platform: macos-latest
             args: "--target aarch64-apple-darwin --bundles dmg"
-            artifact: "OptiCore*_aarch64.dmg"
-            name: "macOS Apple Silicon"
+            name: "macOS-ARM"
           - platform: macos-latest
             args: "--target x86_64-apple-darwin --bundles dmg"
-            artifact: "OptiCore*_x64.dmg"
-            name: "macOS Intel"
+            name: "macOS-Intel"
           - platform: ubuntu-22.04
             args: "--bundles deb,appimage"
-            artifact: "OptiCore*.deb"
-            name: "Linux deb"
+            name: "Linux"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -52,8 +48,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
 
-      - name: Install frontend deps
-        run: npm --prefix frontend install
+      - name: Install frontend dependencies
+        run: cd frontend && npm install
+
+      - name: Build frontend
+        run: cd frontend && npm run build
 
       - name: Build and bundle
         uses: tauri-apps/tauri-action@v0
@@ -64,18 +63,7 @@ jobs:
           tauriScript: cargo tauri
           tagName: ${{ github.ref_name }}
           releaseName: "OptiCore ${{ github.ref_name }}"
-          releaseBody: "OptiCore Practice Management System. Download the installer for your platform below."
+          releaseBody: "OptiCore Practice Management System — download the installer for your platform below. Demo login: admin / admin"
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.name }}
-          path: |
-            target/release/bundle/**/*.msi
-            target/release/bundle/**/*.exe
-            target/release/bundle/**/*.dmg
-            target/release/bundle/**/*.deb
-            target/release/bundle/**/*.AppImage
