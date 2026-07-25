@@ -15,6 +15,7 @@ import { IntakePage } from "./pages/IntakePage";
 import { MessagesPage } from "./pages/MessagesPage";
 import { UsersPage } from "./pages/UsersPage";
 import { Settings } from "./pages/Settings";
+import { GuidePage } from "./pages/GuidePage";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const token = localStorage.getItem("pms_token");
@@ -50,6 +51,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route path="messages" element={<MessagesPage />} />
             <Route path="users" element={<UsersPage />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="guide" element={<GuidePage />} />
             <Route path="*" element={<NotFound />} />
           </Route>
         </Routes>

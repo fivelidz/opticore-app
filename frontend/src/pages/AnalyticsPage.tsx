@@ -6,6 +6,7 @@ import {
 } from "recharts";
 import {
   analytics, type AnalyticsOverview, type TimeSeriesPoint, type WebsiteTrafficPoint, type SourceBreakdown,
+  type RevenueByType, type NoShowRate, type HourCount, type AgeBracket, type OutstandingPatient,
 } from "../api";
 
 const PIE_COLORS = ["#4f9cf9", "#4ade80", "#fbbf24", "#f87171", "#a78bfa"];
@@ -19,6 +20,12 @@ export function AnalyticsPage() {
   const [appt, setAppt] = useState<TimeSeriesPoint[]>([]);
   const [traffic, setTraffic] = useState<WebsiteTrafficPoint[]>([]);
   const [sources, setSources] = useState<SourceBreakdown[]>([]);
+  const [growth, setGrowth] = useState<TimeSeriesPoint[]>([]);
+  const [revByType, setRevByType] = useState<RevenueByType[]>([]);
+  const [noShow, setNoShow] = useState<NoShowRate | null>(null);
+  const [hours, setHours] = useState<HourCount[]>([]);
+  const [ages, setAges] = useState<AgeBracket[]>([]);
+  const [outstanding, setOutstanding] = useState<OutstandingPatient[]>([]);
   const [range, setRange] = useState(30);
 
   useEffect(() => {
@@ -27,7 +34,17 @@ export function AnalyticsPage() {
     analytics.appointments(range).then((r) => setAppt(r.data));
     analytics.traffic(range).then((r) => setTraffic(r.data));
     analytics.trafficBySource().then((r) => setSources(r.data));
+    analytics.patientGrowth(range).then((r) => setGrowth(r.data));
   }, [range]);
+
+  // These aggregates aren't range-dependent — fetch once.
+  useEffect(() => {
+    analytics.revenueByType().then((r) => setRevByType(r.data));
+    analytics.noShowRate().then((r) => setNoShow(r.data));
+    analytics.hourDistribution().then((r) => setHours(r.data));
+    analytics.ageDemographics().then((r) => setAges(r.data));
+    analytics.outstandingByPatient().then((r) => setOutstanding(r.data));
+  }, []);
 
   const trafficAgg = aggregateTraffic(traffic);
   const fmtDate = (s: string) => s.slice(5);
@@ -61,18 +78,18 @@ export function AnalyticsPage() {
         ))}
       </div>
 
-      {tab === "overview" && <OverviewTab ov={ov} nav={nav} />}
-      {tab === "financial" && <FinancialTab ov={ov} rev={rev} fmtDate={fmtDate} />}
-      {tab === "patients" && <PatientsTab ov={ov} appt={appt} fmtDate={fmtDate} nav={nav} />}
+      {tab === "overview" && <OverviewTab ov={ov} nav={nav} hours={hours} noShow={noShow} />}
+      {tab === "financial" && <FinancialTab ov={ov} rev={rev} fmtDate={fmtDate} revByType={revByType} />}
+      {tab === "patients" && <PatientsTab ov={ov} appt={appt} fmtDate={fmtDate} nav={nav} growth={growth} ages={ages} />}
       {tab === "website" && <WebsiteTab trafficAgg={trafficAgg} sources={sources} />}
-      {tab === "reports" && <ReportsTab />}
+      {tab === "reports" && <ReportsTab ov={ov} revByType={revByType} noShow={noShow} ages={ages} outstanding={outstanding} nav={nav} />}
 
       <style>{AN_STYLE}</style>
     </div>
   );
 }
 
-function OverviewTab({ ov, nav }: any) {
+function OverviewTab({ ov, nav, hours, noShow }: any) {
   const stats = [
     { label: "Total Revenue", value: ov ? `$${ov.total_revenue.toLocaleString()}` : "—", sub: ov ? `+${ov.revenue_this_month.toLocaleString()} this month` : "", color: "var(--green)", icon: "$", to: "/analytics" },
     { label: "Outstanding", value: ov ? `$${ov.outstanding_balance.toLocaleString()}` : "—", sub: "awaiting payment", color: "var(--red)", icon: "!" },
@@ -94,11 +111,54 @@ function OverviewTab({ ov, nav }: any) {
           </div>
         ))}
       </div>
+
+      <div className="chart-row">
+        <div className="card chart-card">
+          <h3 className="card-h">Busiest Hours</h3>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={(hours || []).map((h: HourCount) => ({ hour: fmtHour(h.hour), Appointments: h.count }))}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="hour" stroke="var(--text-dim)" fontSize={10} interval={1} />
+              <YAxis allowDecimals={false} stroke="var(--text-dim)" fontSize={11} />
+              <Tooltip contentStyle={tooltipStyle} />
+              <Bar dataKey="Appointments" fill="#a78bfa" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="card chart-card">
+          <h3 className="card-h">Appointment Reliability</h3>
+          {noShow ? (
+            <div className="rel-wrap">
+              <div className="rel-row">
+                <span className="rel-lab">Completed</span>
+                <div className="rel-bar"><div className="rel-fill" style={{ width: `${pct(noShow.completed, noShow.total)}%`, background: "var(--green)" }} /></div>
+                <span className="rel-num">{noShow.completed}</span>
+              </div>
+              <div className="rel-row">
+                <span className="rel-lab">No-shows</span>
+                <div className="rel-bar"><div className="rel-fill" style={{ width: `${pct(noShow.no_show, noShow.total)}%`, background: "var(--red)" }} /></div>
+                <span className="rel-num">{noShow.no_show}</span>
+              </div>
+              <div className="rel-row">
+                <span className="rel-lab">Cancelled</span>
+                <div className="rel-bar"><div className="rel-fill" style={{ width: `${pct(noShow.cancelled, noShow.total)}%`, background: "var(--amber)" }} /></div>
+                <span className="rel-num">{noShow.cancelled}</span>
+              </div>
+              <div className="rel-summary">
+                <div><span className="rel-big" style={{ color: "var(--red)" }}>{noShow.no_show_rate.toFixed(1)}%</span><span className="rel-cap">No-show rate</span></div>
+                <div><span className="rel-big" style={{ color: "var(--amber)" }}>{noShow.cancellation_rate.toFixed(1)}%</span><span className="rel-cap">Cancellation rate</span></div>
+              </div>
+            </div>
+          ) : <div className="empty-note">No appointment data yet.</div>}
+        </div>
+      </div>
     </>
   );
 }
 
-function FinancialTab({ ov, rev, fmtDate }: any) {
+function FinancialTab({ ov, rev, fmtDate, revByType }: any) {
+  const rbt: RevenueByType[] = revByType || [];
+  const totalRbt = rbt.reduce((s, r) => s + r.revenue, 0);
   return (
     <>
       <div className="fin-row">
@@ -120,11 +180,49 @@ function FinancialTab({ ov, rev, fmtDate }: any) {
           </AreaChart>
         </ResponsiveContainer>
       </div>
+
+      <div className="chart-row">
+        <div className="card chart-card">
+          <h3 className="card-h">Revenue by Appointment Type</h3>
+          {rbt.length ? (
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart layout="vertical" data={rbt.map((r) => ({ type: cap(r.appointment_type), Revenue: r.revenue }))} margin={{ left: 20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis type="number" stroke="var(--text-dim)" fontSize={11} tickFormatter={(v: number) => `$${v.toLocaleString()}`} />
+                <YAxis type="category" dataKey="type" stroke="var(--text-dim)" fontSize={11} width={110} />
+                <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => `$${Number(v).toLocaleString()}`} />
+                <Bar dataKey="Revenue" radius={[0, 4, 4, 0]}>
+                  {rbt.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : <div className="empty-note">No invoiced revenue yet.</div>}
+        </div>
+        <div className="card chart-card">
+          <h3 className="card-h">Breakdown</h3>
+          <table className="dt">
+            <thead><tr><th>Type</th><th>Invoices</th><th>Revenue</th><th>Share</th></tr></thead>
+            <tbody>
+              {rbt.map((r, i) => (
+                <tr key={r.appointment_type}>
+                  <td><span className="dot" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />{cap(r.appointment_type)}</td>
+                  <td>{r.count}</td>
+                  <td>${r.revenue.toLocaleString()}</td>
+                  <td>{totalRbt > 0 ? ((r.revenue / totalRbt) * 100).toFixed(1) : "0"}%</td>
+                </tr>
+              ))}
+              {!rbt.length && <tr><td colSpan={4} className="empty-note">No data.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </>
   );
 }
 
-function PatientsTab({ ov, appt, fmtDate, nav }: any) {
+function PatientsTab({ ov, appt, fmtDate, nav, growth, ages }: any) {
+  const gr: TimeSeriesPoint[] = growth || [];
+  const ag: AgeBracket[] = ages || [];
   return (
     <>
       <div className="fin-row">
@@ -142,6 +240,37 @@ function PatientsTab({ ov, appt, fmtDate, nav }: any) {
             <Bar dataKey="Appointments" fill="#4f9cf9" radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
+      </div>
+
+      <div className="chart-row">
+        <div className="card chart-card">
+          <h3 className="card-h">Patient Growth (new per week)</h3>
+          {gr.length ? (
+            <ResponsiveContainer width="100%" height={260}>
+              <AreaChart data={gr.map((p) => ({ week: fmtDate(p.date), "New patients": p.value }))}>
+                <defs><linearGradient id="grow" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#4f9cf9" stopOpacity={0.4} /><stop offset="95%" stopColor="#4f9cf9" stopOpacity={0} /></linearGradient></defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="week" stroke="var(--text-dim)" fontSize={11} />
+                <YAxis allowDecimals={false} stroke="var(--text-dim)" fontSize={11} />
+                <Tooltip contentStyle={tooltipStyle} />
+                <Area type="monotone" dataKey="New patients" stroke="#4f9cf9" strokeWidth={2} fill="url(#grow)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : <div className="empty-note">No new patients in this range.</div>}
+        </div>
+        <div className="card chart-card">
+          <h3 className="card-h">Age Demographics</h3>
+          {ag.some((a) => a.count > 0) ? (
+            <ResponsiveContainer width="100%" height={260}>
+              <PieChart>
+                <Pie data={ag.filter((a) => a.count > 0)} dataKey="count" nameKey="bracket" cx="50%" cy="50%" outerRadius={80} label={(e: any) => `${e.bracket} (${e.count})`}>
+                  {ag.filter((a) => a.count > 0).map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                </Pie>
+                <Tooltip contentStyle={tooltipStyle} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <div className="empty-note">No patient age data yet.</div>}
+        </div>
       </div>
     </>
   );
@@ -197,33 +326,160 @@ function WebsiteTab({ trafficAgg, sources }: any) {
   );
 }
 
-function ReportsTab() {
-  const reports = [
-    { name: "Patient Demographics", desc: "Age, gender, location breakdown of your patient base", icon: "👥" },
-    { name: "Financial Summary", desc: "Revenue, tax, outstanding balances, payment methods", icon: "💰" },
-    { name: "Treatment Outcomes", desc: "OSDI score progression, IPL response rates", icon: "🔬" },
-    { name: "Appointment Analytics", desc: "No-shows, cancellations, peak times, duration", icon: "📅" },
-    { name: "Practitioner Productivity", desc: "Per-doctor revenue, volume, outcomes", icon: "🧑‍⚕️" },
-    { name: "Inventory Report", desc: "Stock levels, usage, reordering", icon: "📦" },
+function ReportsTab({ ov, revByType, noShow, ages, outstanding, nav }: any) {
+  const [active, setActive] = useState<string | null>(null);
+  const reports: { name: string; desc: string; icon: string; live: boolean }[] = [
+    { name: "Financial Summary", desc: "Revenue, outstanding balances, revenue by type", icon: "💰", live: true },
+    { name: "Patient Demographics", desc: "Age bracket breakdown of your patient base", icon: "👥", live: true },
+    { name: "Appointment Analytics", desc: "No-shows, cancellations, completion rate", icon: "📅", live: true },
+    { name: "Outstanding Balances", desc: "Top patients owing money, by amount", icon: "🧾", live: true },
+    { name: "Treatment Outcomes", desc: "OSDI score progression, IPL response rates", icon: "🔬", live: false },
+    { name: "Inventory Report", desc: "Stock levels, usage, reordering", icon: "📦", live: false },
   ];
+
   return (
     <>
-      <div className="card info-banner">📋 <strong>Reports</strong> are part of Phase 6 (comes last). These will be fully generated, exportable reports. Below is the planned catalog.</div>
+      <div className="card info-banner">📋 Click a <strong>live report</strong> to generate a summary from your current data. Exportable/print versions are planned for a later phase.</div>
       <div className="rep-grid">
         {reports.map((r) => (
-          <div key={r.name} className="card rep-card">
+          <div key={r.name} className={`card rep-card ${active === r.name ? "rep-on" : ""}`}>
             <div className="rep-icon">{r.icon}</div>
             <h3>{r.name}</h3>
             <p>{r.desc}</p>
-            <button className="btn-ghost rep-btn" disabled>Coming in Phase 6</button>
+            {r.live ? (
+              <button className="btn-ghost rep-btn live" onClick={() => setActive(active === r.name ? null : r.name)}>
+                {active === r.name ? "Hide" : "Generate"}
+              </button>
+            ) : (
+              <button className="btn-ghost rep-btn" disabled>Coming soon</button>
+            )}
           </div>
         ))}
       </div>
+
+      {active && (
+        <div className="card report-out">
+          <h3 className="card-h">{active}</h3>
+          {active === "Financial Summary" && <FinancialSummaryReport ov={ov} revByType={revByType} outstanding={outstanding} />}
+          {active === "Patient Demographics" && <DemographicsReport ages={ages} ov={ov} />}
+          {active === "Appointment Analytics" && <AppointmentReport noShow={noShow} />}
+          {active === "Outstanding Balances" && <OutstandingReport outstanding={outstanding} nav={nav} />}
+        </div>
+      )}
     </>
   );
 }
 
+function FinancialSummaryReport({ ov, revByType, outstanding }: any) {
+  const rbt: RevenueByType[] = revByType || [];
+  const totalRbt = rbt.reduce((s, r) => s + r.revenue, 0);
+  const totalOutstanding = (outstanding || []).reduce((s: number, r: OutstandingPatient) => s + r.outstanding, 0);
+  return (
+    <>
+      <div className="rep-kpis">
+        <div><span className="rep-kv" style={{ color: "var(--green)" }}>${ov?.total_revenue.toLocaleString() ?? "—"}</span><span className="rep-kl">Total revenue</span></div>
+        <div><span className="rep-kv" style={{ color: "var(--green)" }}>${ov?.revenue_this_month.toLocaleString() ?? "—"}</span><span className="rep-kl">This month</span></div>
+        <div><span className="rep-kv" style={{ color: "var(--red)" }}>${ov?.outstanding_balance.toLocaleString() ?? "—"}</span><span className="rep-kl">Outstanding</span></div>
+        <div><span className="rep-kv">${ov?.avg_appt_value.toFixed(0) ?? "—"}</span><span className="rep-kl">Avg per visit</span></div>
+      </div>
+      <h4 className="rep-sub">Revenue by appointment type</h4>
+      <table className="dt">
+        <thead><tr><th>Type</th><th>Invoices</th><th>Revenue</th><th>Share</th></tr></thead>
+        <tbody>
+          {rbt.map((r) => (
+            <tr key={r.appointment_type}>
+              <td>{cap(r.appointment_type)}</td><td>{r.count}</td>
+              <td>${r.revenue.toLocaleString()}</td>
+              <td>{totalRbt > 0 ? ((r.revenue / totalRbt) * 100).toFixed(1) : "0"}%</td>
+            </tr>
+          ))}
+          {rbt.length > 0 && (
+            <tr className="rep-total"><td>Total</td><td>{rbt.reduce((s, r) => s + r.count, 0)}</td><td>${totalRbt.toLocaleString()}</td><td>100%</td></tr>
+          )}
+          {!rbt.length && <tr><td colSpan={4} className="empty-note">No invoiced revenue yet.</td></tr>}
+        </tbody>
+      </table>
+      <p className="rep-foot">Outstanding across top patients: <strong style={{ color: "var(--red)" }}>${totalOutstanding.toLocaleString()}</strong></p>
+    </>
+  );
+}
+
+function DemographicsReport({ ages, ov }: any) {
+  const ag: AgeBracket[] = ages || [];
+  const total = ag.reduce((s, a) => s + a.count, 0);
+  return (
+    <>
+      <p className="rep-foot">Total patients: <strong>{ov?.total_patients ?? total}</strong> · with recorded age: <strong>{total}</strong></p>
+      <table className="dt">
+        <thead><tr><th>Age bracket</th><th>Patients</th><th>Share</th></tr></thead>
+        <tbody>
+          {ag.map((a) => (
+            <tr key={a.bracket}>
+              <td>{a.bracket}</td><td>{a.count}</td>
+              <td>{total > 0 ? ((a.count / total) * 100).toFixed(1) : "0"}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
+function AppointmentReport({ noShow }: any) {
+  if (!noShow) return <div className="empty-note">No appointment data yet.</div>;
+  const rows = [
+    { label: "Completed", value: noShow.completed, color: "var(--green)" },
+    { label: "No-shows", value: noShow.no_show, color: "var(--red)" },
+    { label: "Cancelled", value: noShow.cancelled, color: "var(--amber)" },
+  ];
+  return (
+    <>
+      <div className="rep-kpis">
+        <div><span className="rep-kv">{noShow.total}</span><span className="rep-kl">Total appointments</span></div>
+        <div><span className="rep-kv" style={{ color: "var(--red)" }}>{noShow.no_show_rate.toFixed(1)}%</span><span className="rep-kl">No-show rate</span></div>
+        <div><span className="rep-kv" style={{ color: "var(--amber)" }}>{noShow.cancellation_rate.toFixed(1)}%</span><span className="rep-kl">Cancellation rate</span></div>
+      </div>
+      <table className="dt">
+        <thead><tr><th>Status</th><th>Count</th><th>Share</th></tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <td><span className="dot" style={{ background: r.color }} />{r.label}</td>
+              <td>{r.value}</td>
+              <td>{pct(r.value, noShow.total).toFixed(1)}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
+function OutstandingReport({ outstanding, nav }: any) {
+  const rows: OutstandingPatient[] = outstanding || [];
+  return rows.length ? (
+    <table className="dt">
+      <thead><tr><th>Patient</th><th>MRN</th><th>Invoices</th><th>Outstanding</th></tr></thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.patient_id} className="clickable-row" onClick={() => nav(`/patients/${r.patient_id}`)}>
+            <td>{r.name}</td><td>{r.mrn}</td><td>{r.invoice_count}</td>
+            <td style={{ color: "var(--red)", fontWeight: 600 }}>${r.outstanding.toLocaleString()}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  ) : <div className="empty-note">No outstanding balances. 🎉</div>;
+}
+
 const tooltipStyle = { background: "var(--bg-elev-2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 };
+const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+const pct = (n: number, total: number) => (total > 0 ? (n / total) * 100 : 0);
+const fmtHour = (h: number) => {
+  const ampm = h < 12 ? "a" : "p";
+  const hr = h % 12 === 0 ? 12 : h % 12;
+  return `${hr}${ampm}`;
+};
 function aggregateTraffic(points: WebsiteTrafficPoint[]) {
   const byDate: Record<string, { visitors: number; bookings: number }> = {};
   for (const p of points) {
@@ -270,5 +526,30 @@ const AN_STYLE = `
   .rep-card h3 { font-size: 15px; margin-bottom: 6px; }
   .rep-card p { font-size: 13px; color: var(--text-dim); margin-bottom: 14px; }
   .rep-btn { font-size: 12px; opacity: 0.6; }
-  @media (max-width: 900px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } .fin-row { grid-template-columns: repeat(2, 1fr); } .chart-row { grid-template-columns: 1fr; } .rep-grid { grid-template-columns: 1fr; } }
+  .rep-btn.live { opacity: 1; cursor: pointer; border-color: var(--accent); color: var(--accent); }
+  .rep-btn.live:hover { background: var(--accent); color: white; }
+  .rep-card.rep-on { border-color: var(--accent); }
+  .report-out { margin-top: 16px; }
+  .rep-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+  .rep-kpis > div { display: flex; flex-direction: column; gap: 2px; }
+  .rep-kv { font-size: 22px; font-weight: 700; }
+  .rep-kl { font-size: 12px; color: var(--text-dim); }
+  .rep-sub { font-size: 13px; font-weight: 600; margin: 8px 0 10px; color: var(--text); }
+  .rep-total td { font-weight: 700; border-top: 2px solid var(--border); }
+  .rep-foot { font-size: 13px; color: var(--text-dim); margin-top: 12px; }
+  .empty-note { color: var(--text-dim); font-size: 13px; padding: 30px 10px; text-align: center; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+  .clickable-row { cursor: pointer; }
+  .clickable-row:hover { background: var(--bg-elev); }
+  .rel-wrap { display: flex; flex-direction: column; gap: 14px; padding: 6px 0; }
+  .rel-row { display: grid; grid-template-columns: 90px 1fr 40px; align-items: center; gap: 10px; }
+  .rel-lab { font-size: 12px; color: var(--text-dim); }
+  .rel-bar { height: 10px; background: var(--bg-elev); border-radius: 5px; overflow: hidden; }
+  .rel-fill { height: 100%; border-radius: 5px; transition: width 0.3s; }
+  .rel-num { font-size: 13px; font-weight: 600; text-align: right; }
+  .rel-summary { display: flex; gap: 30px; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .rel-summary > div { display: flex; flex-direction: column; }
+  .rel-big { font-size: 22px; font-weight: 700; }
+  .rel-cap { font-size: 11px; color: var(--text-dim); }
+  @media (max-width: 900px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } .fin-row { grid-template-columns: repeat(2, 1fr); } .chart-row { grid-template-columns: 1fr; } .rep-grid { grid-template-columns: 1fr; } .rep-kpis { grid-template-columns: repeat(2, 1fr); } }
 `;

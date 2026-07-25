@@ -10,6 +10,7 @@ mod auth;
 mod db;
 mod error;
 mod routes;
+mod sync;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -51,6 +52,10 @@ async fn main() -> Result<()> {
 
     let jwt = Arc::new(auth::JwtCfg::from_env());
     let state = AppState { db: pool.clone(), jwt };
+
+    // Start the background sync loop (pushes availability + pulls bookings from
+    // the Cloudflare Worker every ~30s). No-op if WORKER_URL is unset.
+    sync::start(state.clone());
 
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
 
@@ -150,11 +155,22 @@ async fn main() -> Result<()> {
         .route("/api/analytics/appointments/:days", get(routes::analytics::appointment_series))
         .route("/api/analytics/traffic/:days", get(routes::analytics::traffic_series))
         .route("/api/analytics/traffic-by-source", get(routes::analytics::traffic_by_source))
+        .route("/api/analytics/patient-growth/:days", get(routes::analytics::patient_growth))
+        .route("/api/analytics/revenue-by-type", get(routes::analytics::revenue_by_type))
+        .route("/api/analytics/no-show-rate", get(routes::analytics::no_show_rate))
+        .route("/api/analytics/hour-distribution", get(routes::analytics::hour_distribution))
+        .route("/api/analytics/age-demographics", get(routes::analytics::age_demographics))
+        .route("/api/analytics/outstanding-by-patient", get(routes::analytics::outstanding_by_patient))
         // intake management (staff)
         .route("/api/intake", get(routes::intake::list))
         .route("/api/intake/:id/import", post(routes::intake::import))
         .route("/api/intake/:id/archive", post(routes::intake::archive))
         .route("/api/intake/auto-import", post(routes::intake::auto_import))
+        // booking settings + notifications
+        .route("/api/booking-settings", get(routes::booking_settings::get_settings).put(routes::booking_settings::update_settings))
+        .route("/api/booking-notifications", get(routes::booking_settings::list_notifications).post(routes::booking_settings::send_pending))
+        .route("/api/intake/:id/approve", post(routes::booking_settings::approve_intake))
+        .route("/api/intake/:id/decline", post(routes::booking_settings::decline_intake))
         // messages inbox
         .route(
             "/api/messages",
@@ -163,6 +179,9 @@ async fn main() -> Result<()> {
         .route("/api/messages/:id/read", post(routes::messages::mark_read))
         .route("/api/messages/:id/archive", post(routes::messages::archive))
         .route("/api/messages/:id/link/:pid", post(routes::messages::link_patient))
+        // sync engine status + manual trigger
+        .route("/api/sync/status", get(sync_status))
+        .route("/api/sync/now", post(sync_now))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,
@@ -210,4 +229,47 @@ async fn health(
         version: env!("CARGO_PKG_VERSION").into(),
         clinic: "OptiCore".into(),
     })
+}
+
+/// GET /api/sync/status — report whether the Worker sync is configured and how
+/// many intake submissions are still pending (status = 'new').
+async fn sync_status(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> error::ApiResult<axum::Json<serde_json::Value>> {
+    let worker_url = std::env::var("WORKER_URL").ok().filter(|u| !u.is_empty());
+    let configured = worker_url.is_some();
+
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM intake_submissions WHERE status = 'new'",
+    )
+    .fetch_one(&state.db)
+    .await?;
+
+    // Most recent intake that arrived via the worker sync, if any.
+    let last_worker_intake: Option<String> = sqlx::query_scalar(
+        "SELECT submitted_at FROM intake_submissions \
+         WHERE source = 'worker-sync' ORDER BY submitted_at DESC LIMIT 1",
+    )
+    .fetch_optional(&state.db)
+    .await?;
+
+    Ok(axum::Json(serde_json::json!({
+        "configured": configured,
+        "worker_url": worker_url,
+        "sync_interval_secs": 30,
+        "pending_intake": pending,
+        "last_worker_intake": last_worker_intake,
+    })))
+}
+
+/// POST /api/sync/now — force an immediate sync cycle (push + pull). Useful for
+/// testing without waiting for the 30-second interval.
+async fn sync_now(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> error::ApiResult<axum::Json<serde_json::Value>> {
+    sync::run_sync_cycle(&state).await?;
+    Ok(axum::Json(serde_json::json!({
+        "ok": true,
+        "message": "sync cycle triggered",
+    })))
 }

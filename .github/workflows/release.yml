@@ -66,7 +66,7 @@ jobs:
           tauriScript: cargo tauri
           tagName: ${{ github.ref_name }}
           releaseName: "OptiCore ${{ github.ref_name }}"
-          releaseBody: "OptiCore Practice Management System — download the installer for your platform below. Demo login: admin / admin"
+          releaseBody: "OptiCore Practice Management System — download the installer for your platform below. Production build (clean database, no demo data). Demo login: admin / admin"
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

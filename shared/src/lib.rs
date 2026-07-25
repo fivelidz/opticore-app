@@ -480,6 +480,44 @@ pub struct SourceBreakdown {
     pub bookings: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RevenueByType {
+    pub appointment_type: String,
+    pub revenue: f64,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NoShowRate {
+    pub total: i64,
+    pub no_show: i64,
+    pub cancelled: i64,
+    pub completed: i64,
+    pub no_show_rate: f64,
+    pub cancellation_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HourCount {
+    pub hour: i64,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgeBracket {
+    pub bracket: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OutstandingPatient {
+    pub patient_id: i64,
+    pub name: String,
+    pub mrn: String,
+    pub outstanding: f64,
+    pub invoice_count: i64,
+}
+
 // ---------- Intake submissions (public input page) ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -629,3 +667,73 @@ pub struct UploadPhoto {
 }
 fn default_photo_category() -> String { "document".into() }
 fn default_mime() -> String { "image/jpeg".into() }
+
+// ---------- Booking settings ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookingSettings {
+    pub booking_mode: String,
+    pub auto_confirm_message: bool,
+    pub auto_reminder_message: bool,
+    pub reminder_hours_before: i64,
+    pub email_provider: String,
+    pub email_api_key: Option<String>,
+    pub email_from: String,
+    pub sms_provider: String,
+    pub sms_api_key: Option<String>,
+    pub sms_sender: String,
+    pub template_booking_received: String,
+    pub template_booking_confirmed: String,
+    pub template_booking_declined: String,
+    pub template_reminder: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateBookingSettings {
+    #[serde(default)]
+    pub booking_mode: Option<String>,
+    #[serde(default)]
+    pub auto_confirm_message: Option<bool>,
+    #[serde(default)]
+    pub auto_reminder_message: Option<bool>,
+    #[serde(default)]
+    pub reminder_hours_before: Option<i64>,
+    #[serde(default)]
+    pub email_provider: Option<String>,
+    #[serde(default)]
+    pub email_api_key: Option<String>,
+    #[serde(default)]
+    pub email_from: Option<String>,
+    #[serde(default)]
+    pub sms_provider: Option<String>,
+    #[serde(default)]
+    pub sms_api_key: Option<String>,
+    #[serde(default)]
+    pub sms_sender: Option<String>,
+    #[serde(default)]
+    pub template_booking_received: Option<String>,
+    #[serde(default)]
+    pub template_booking_confirmed: Option<String>,
+    #[serde(default)]
+    pub template_booking_declined: Option<String>,
+    #[serde(default)]
+    pub template_reminder: Option<String>,
+}
+
+// ---------- Booking notifications ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookingNotification {
+    pub id: i64,
+    pub booking_id: Option<i64>,
+    pub intake_submission_id: Option<i64>,
+    pub channel: String,
+    pub recipient: String,
+    pub template_used: Option<String>,
+    pub body: String,
+    pub status: String,
+    pub provider_response: Option<String>,
+    pub sent_at: Option<String>,
+    pub created_at: String,
+}

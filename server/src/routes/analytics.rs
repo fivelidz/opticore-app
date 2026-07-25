@@ -4,7 +4,10 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use shared::{AnalyticsOverview, SourceBreakdown, TimeSeriesPoint, WebsiteTrafficPoint};
+use shared::{
+    AgeBracket, AnalyticsOverview, HourCount, NoShowRate, OutstandingPatient, RevenueByType,
+    SourceBreakdown, TimeSeriesPoint, WebsiteTrafficPoint,
+};
 use sqlx::Row;
 
 use crate::error::ApiResult;
@@ -84,5 +87,135 @@ pub async fn traffic_by_source(State(state): State<AppState>) -> ApiResult<Json<
         .await?;
     Ok(Json(rows.iter().map(|r| SourceBreakdown {
         source: r.get("source"), visitors: r.get("visitors"), bookings: r.get("bookings"),
+    }).collect()))
+}
+
+/// New patients per week for the last N days (grouped by ISO week start).
+pub async fn patient_growth(State(state): State<AppState>, Path(days): Path<i64>) -> ApiResult<Json<Vec<TimeSeriesPoint>>> {
+    // SQLite: bucket each created_at into the Monday of its week via date(created_at,'weekday 0','-6 days').
+    let rows = sqlx::query(
+        "SELECT date(created_at, 'weekday 0', '-6 days') AS wk, COUNT(*) AS v
+         FROM patients
+         WHERE created_at >= date('now', ?)
+         GROUP BY wk ORDER BY wk")
+        .bind(format!("-{days} days"))
+        .fetch_all(&state.db)
+        .await?;
+    Ok(Json(rows.iter().map(|r| TimeSeriesPoint {
+        date: r.get("wk"), value: r.get::<i64, _>("v") as f64,
+    }).collect()))
+}
+
+/// Revenue (amount paid) broken down by appointment_type.
+/// Joins invoices -> appointments; invoices without a linked appointment are grouped as 'Unlinked'.
+pub async fn revenue_by_type(State(state): State<AppState>) -> ApiResult<Json<Vec<RevenueByType>>> {
+    let rows = sqlx::query(
+        "SELECT COALESCE(a.appointment_type, 'Unlinked') AS t,
+                COALESCE(SUM(i.amount_paid), 0) AS rev,
+                COUNT(i.id) AS cnt
+         FROM invoices i
+         LEFT JOIN appointments a ON a.id = i.appointment_id
+         GROUP BY t
+         ORDER BY rev DESC")
+        .fetch_all(&state.db)
+        .await?;
+    Ok(Json(rows.iter().map(|r| RevenueByType {
+        appointment_type: r.get("t"),
+        revenue: r.get("rev"),
+        count: r.get("cnt"),
+    }).collect()))
+}
+
+/// No-show / cancellation rate across all appointments.
+pub async fn no_show_rate(State(state): State<AppState>) -> ApiResult<Json<NoShowRate>> {
+    let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM appointments").fetch_one(&state.db).await?;
+    let ns: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM appointments WHERE status = 'noshow'").fetch_one(&state.db).await?;
+    let cx: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM appointments WHERE status = 'cancelled'").fetch_one(&state.db).await?;
+    let comp: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM appointments WHERE status = 'completed'").fetch_one(&state.db).await?;
+    let t = total.0 as f64;
+    Ok(Json(NoShowRate {
+        total: total.0,
+        no_show: ns.0,
+        cancelled: cx.0,
+        completed: comp.0,
+        no_show_rate: if t > 0.0 { ns.0 as f64 / t * 100.0 } else { 0.0 },
+        cancellation_rate: if t > 0.0 { cx.0 as f64 / t * 100.0 } else { 0.0 },
+    }))
+}
+
+/// Appointment count by hour of day (0-23).
+pub async fn hour_distribution(State(state): State<AppState>) -> ApiResult<Json<Vec<HourCount>>> {
+    let rows = sqlx::query(
+        "SELECT CAST(strftime('%H', appointment_date) AS INTEGER) AS h, COUNT(*) AS v
+         FROM appointments
+         GROUP BY h ORDER BY h")
+        .fetch_all(&state.db)
+        .await?;
+    // Build a dense 0-23 series so every hour appears (zeros for empty slots).
+    let mut counts = [0i64; 24];
+    for r in &rows {
+        let h: i64 = r.get("h");
+        if (0..24).contains(&h) {
+            counts[h as usize] = r.get::<i64, _>("v");
+        }
+    }
+    Ok(Json((0..24).map(|h| HourCount { hour: h, count: counts[h as usize] }).collect()))
+}
+
+/// Patient counts by age bracket, computed from date_of_birth.
+pub async fn age_demographics(State(state): State<AppState>) -> ApiResult<Json<Vec<AgeBracket>>> {
+    let rows = sqlx::query(
+        "SELECT
+           CASE
+             WHEN age <= 18 THEN '0-18'
+             WHEN age <= 35 THEN '19-35'
+             WHEN age <= 50 THEN '36-50'
+             WHEN age <= 65 THEN '51-65'
+             ELSE '65+'
+           END AS bracket,
+           COUNT(*) AS v
+         FROM (
+           SELECT CAST((julianday('now') - julianday(date_of_birth)) / 365.25 AS INTEGER) AS age
+           FROM patients
+           WHERE date_of_birth IS NOT NULL AND date_of_birth != ''
+         )
+         GROUP BY bracket")
+        .fetch_all(&state.db)
+        .await?;
+    // Preserve a fixed bracket order regardless of which buckets have rows.
+    let order = ["0-18", "19-35", "36-50", "51-65", "65+"];
+    let mut map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for r in &rows {
+        map.insert(r.get::<String, _>("bracket"), r.get::<i64, _>("v"));
+    }
+    Ok(Json(order.iter().map(|b| AgeBracket {
+        bracket: b.to_string(),
+        count: *map.get(*b).unwrap_or(&0),
+    }).collect()))
+}
+
+/// Top 10 patients ranked by outstanding balance.
+pub async fn outstanding_by_patient(State(state): State<AppState>) -> ApiResult<Json<Vec<OutstandingPatient>>> {
+    let rows = sqlx::query(
+        "SELECT p.id AS pid,
+                p.first_name || ' ' || p.last_name AS name,
+                p.mrn AS mrn,
+                COALESCE(SUM(i.balance_due), 0) AS outstanding,
+                COUNT(i.id) AS invoice_count
+         FROM patients p
+         JOIN invoices i ON i.patient_id = p.id
+         WHERE i.status IN ('issued','partially_paid','overdue')
+         GROUP BY p.id
+         HAVING outstanding > 0
+         ORDER BY outstanding DESC
+         LIMIT 10")
+        .fetch_all(&state.db)
+        .await?;
+    Ok(Json(rows.iter().map(|r| OutstandingPatient {
+        patient_id: r.get("pid"),
+        name: r.get("name"),
+        mrn: r.get("mrn"),
+        outstanding: r.get("outstanding"),
+        invoice_count: r.get("invoice_count"),
     }).collect()))
 }

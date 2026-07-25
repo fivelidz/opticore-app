@@ -40,7 +40,7 @@ export function App() {
           <div className="brand-mark">👁️</div>
           <div>
             <div className="brand-title">OptiCore</div>
-            <div className="brand-sub">Dry Eye Clinic</div>
+            <div className="brand-sub">Practice Management</div>
           </div>
         </div>
 
@@ -53,6 +53,7 @@ export function App() {
           {navItem("/users", "Users", "🧑‍⚕️")}
           {navItem("/analytics", "Analytics", "📈")}
           {navItem("/settings", "Settings", "⚙️")}
+          {navItem("/guide", "Guide", "📖")}
         </nav>
 
         <div className="sidebar-footer">

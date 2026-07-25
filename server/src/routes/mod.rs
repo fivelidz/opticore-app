@@ -9,6 +9,7 @@ pub mod clinical;
 pub mod billing;
 pub mod analytics;
 pub mod intake;
+pub mod booking_settings;
 pub mod messages;
 pub mod users;
 pub mod photos;

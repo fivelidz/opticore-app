@@ -6,31 +6,41 @@
 <title>OptiCore — Book Online</title>
 <style>
   :root {
-    --bg: #0f1115; --card: #171a21; --border: #2a313d; --text: #e6e9ef;
-    --dim: #9aa3b2; --accent: #4f9cf9; --green: #4ade80; --amber: #fbbf24; --red: #f87171;
+    --bg: #0f1115; --card: #171a21; --border: #2a313d; --text: #f0f2f6;
+    --dim: #aab3c2; --accent: #5ba3fb; --green: #4ade80; --amber: #fbbf24; --red: #f87171;
     --r: 10px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: radial-gradient(circle at 50% 0%, #1a2030, var(--bg)); color: var(--text); min-height: 100vh; padding: 24px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: radial-gradient(circle at 50% 0%, #1a2030, var(--bg)); color: var(--text); min-height: 100vh; padding: 24px; line-height: 1.5; }
   .wrap { max-width: 680px; margin: 0 auto; }
   .brand { text-align: center; margin-bottom: 28px; }
   .brand .logo { font-size: 44px; }
-  .brand h1 { font-size: 22px; margin-top: 6px; }
-  .brand p { color: var(--dim); font-size: 14px; margin-top: 4px; }
+  .brand h1 { font-size: 24px; margin-top: 6px; font-weight: 700; }
+  .brand p { color: var(--dim); font-size: 15px; margin-top: 4px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--r); padding: 28px; margin-bottom: 16px; }
-  .step { font-size: 11px; font-weight: 700; color: var(--accent); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
-  h2 { font-size: 18px; margin-bottom: 18px; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .step { font-size: 12px; font-weight: 700; color: var(--accent); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px; }
+  h2 { font-size: 20px; margin-bottom: 18px; font-weight: 700; }
+  .sub-heading { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: var(--text); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .full { grid-column: 1 / -1; }
-  label { display: block; font-size: 12px; font-weight: 600; color: var(--dim); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px; }
-  input, select, textarea { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: #0f1115; color: var(--text); font-family: inherit; font-size: 14px; outline: none; }
-  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  label { display: block; font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+  label .opt { color: var(--dim); font-weight: 400; text-transform: none; }
+  input, select, textarea { width: 100%; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border); background: #0f1115; color: var(--text); font-family: inherit; font-size: 15px; outline: none; }
+  input::placeholder, textarea::placeholder { color: #6b7488; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(91,163,251,0.2); }
   textarea { resize: vertical; min-height: 70px; }
   .divider { height: 1px; background: var(--border); margin: 24px 0; }
-  .btn { width: 100%; padding: 14px; border-radius: 8px; border: none; font-size: 15px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  .btn { width: 100%; padding: 14px; border-radius: 8px; border: none; font-size: 16px; font-weight: 600; cursor: pointer; font-family: inherit; }
   .btn-primary { background: var(--accent); color: white; }
   .btn-primary:hover { filter: brightness(1.1); }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .prior-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .prior-btn { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 4px; padding: 20px 16px; border: 2px solid var(--border); border-radius: 12px; background: #0f1115; color: var(--text); cursor: pointer; font-family: inherit; transition: all 0.15s; }
+  .prior-btn:hover { border-color: var(--accent); }
+  .prior-btn.sel { border-color: var(--accent); background: rgba(91,163,251,0.12); }
+  .prior-icon { font-size: 28px; }
+  .prior-title { font-size: 15px; font-weight: 600; }
+  .prior-sub { font-size: 12px; color: var(--dim); }
   .success { text-align: center; padding: 40px 20px; }
   .success .check { font-size: 56px; color: var(--green); }
   .success h2 { margin: 12px 0 8px; }
@@ -46,15 +56,35 @@
   .type-price { font-size: 16px; font-weight: 700; color: var(--green); margin-top: 6px; }
   .slot-section { margin-top: 8px; }
   .day-tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 12px; }
-  .day-tab { padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 13px; white-space: nowrap; background: #0f1115; color: var(--dim); }
-  .day-tab:hover { border-color: var(--accent); }
-  .day-tab.sel { background: var(--accent); color: white; border-color: var(--accent); }
-  .slots { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 8px; }
-  .slot { padding: 10px; text-align: center; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; }
-  .slot:hover { border-color: var(--accent); }
-  .slot.sel { background: var(--accent); color: white; border-color: var(--accent); }
-  .slot.taken { opacity: 0.3; cursor: not-allowed; text-decoration: line-through; }
-  .no-slots { color: var(--dim); font-size: 13px; padding: 12px; text-align: center; }
+  /* Month calendar */
+  .cal-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .cal-month-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; font-weight: 600; font-size: 15px; }
+  .cal-nav-btn { background: var(--card); border: 1px solid var(--border); color: var(--text); width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 18px; }
+  .cal-nav-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .cal-dow-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-bottom: 6px; }
+  .cal-dow { font-size: 12px; font-weight: 700; color: var(--text); text-align: center; padding: 6px 0; text-transform: uppercase; }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+  .cal-cell { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; border-radius: 10px; font-size: 18px; font-weight: 600; cursor: default; position: relative; color: var(--dim); min-height: 48px; }
+  .cal-cell-empty { aspect-ratio: 1; }
+  .cal-cell.past { opacity: 0.25; }
+  .cal-cell.no-slots { opacity: 0.35; }
+  .cal-cell.avail { cursor: pointer; color: var(--text); background: rgba(91,163,251,0.1); font-weight: 600; }
+  .cal-cell.avail:hover { background: rgba(91,163,251,0.25); }
+  .cal-cell.avail.selected { background: var(--accent); color: white; font-weight: 700; }
+  .cal-dot { position: absolute; bottom: 5px; width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+  .cal-cell.avail.selected .cal-dot { background: white; }
+  .cal-times-section { min-height: 200px; }
+  .day-selected-label { font-size: 15px; font-weight: 600; color: var(--accent); margin-bottom: 14px; }
+  .slots-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .slot { padding: 18px 12px; text-align: center; border: 2px solid var(--border); border-radius: 12px; cursor: pointer; font-size: 18px; font-weight: 700; transition:all 0.12s; color: var(--text); background: #0f1115; min-height: 56px; display: flex; align-items: center; justify-content: center; }
+  .slot:hover { border-color: var(--accent); transform:scale(1.03); }
+  .slot.sel { background: var(--accent); color: white; border-color: var(--accent); transform:scale(1.03); }
+  .no-slots { color: var(--dim); font-size: 14px; padding: 16px; text-align: center; }
+  .confirm-bar { position:fixed; bottom:0; left:0; right:0; max-width:680px; margin:0 auto; background:var(--card); border-top:1px solid var(--accent); padding:14px 20px; padding-bottom:calc(14px + env(safe-area-inset-bottom,0px)); display:none; align-items:center; gap:14px; box-shadow:0 -4px 20px rgba(0,0,0,0.4); z-index:50; }
+  .confirm-bar.show { display:flex; }
+  .confirm-label { flex:1; font-size:15px; font-weight:600; }
+  .confirm-btn { width:auto; padding:12px 24px; white-space:nowrap; }
+  @media (max-width:600px) { .cal-layout { grid-template-columns: 1fr; } .wrap { padding-bottom:90px; } }
   .return-banner { background: rgba(79,156,249,0.1); border: 1px solid var(--accent); border-radius: 8px; padding: 14px; margin-bottom: 16px; display: none; }
   .return-banner.show { display: block; }
   .return-banner h3 { font-size: 14px; color: var(--accent); margin-bottom: 4px; }
@@ -62,7 +92,7 @@
   .return-banner .confirm { margin-top: 10px; display: flex; gap: 8px; }
   .return-banner .confirm button { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: #0f1115; color: var(--text); font-size: 13px; cursor: pointer; }
   .return-banner .confirm button.yes { background: var(--accent); color: white; border-color: var(--accent); }
-  @media (max-width: 520px) { .grid, .type-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 520px) { .grid, .type-grid { grid-template-columns: 1fr; } .prior-choice { grid-template-columns: 1fr; } .card { padding: 20px; } .brand h1 { font-size: 22px; } body { padding: 16px; } }
 </style>
 </head>
 <body>
@@ -70,32 +100,48 @@
   <div class="brand">
     <div class="logo">👁️</div>
     <h1>OptiCore</h1>
-    <p>Book your appointment online</p>
+    <p>Request an appointment online</p>
   </div>
 
   <div id="form-card">
     <div class="card">
-      <div class="step">Step 1 of 3 · Your details</div>
-      <h2>Tell us about yourself</h2>
-      <div id="return-banner" class="return-banner">
-        <h3>👋 Welcome back!</h3>
-        <p id="return-msg">It looks like you've visited us before. Is that you?</p>
-        <div class="confirm">
-          <button class="yes" onclick="setReturning(true)">Yes, that's me</button>
-          <button onclick="setReturning(false)">No, different person</button>
-        </div>
+      <div class="step">Step 1 of 3 · About you</div>
+      <h2>Have you visited us before?</h2>
+      <div class="prior-choice">
+        <button type="button" class="prior-btn" id="prior-new" onclick="setPrior('new')">
+          <span class="prior-icon">✨</span>
+          <span class="prior-title">I'm a new patient</span>
+          <span class="prior-sub">This is my first visit</span>
+        </button>
+        <button type="button" class="prior-btn" id="prior-returning" onclick="setPrior('returning')">
+          <span class="prior-icon">👋</span>
+          <span class="prior-title">I've been here before</span>
+          <span class="prior-sub">I'm an existing patient</span>
+        </button>
       </div>
-      <form id="details-form">
-        <div class="grid">
-          <div><label>First name *</label><input name="first_name" id="fn" required oninput="checkReturning()" /></div>
-          <div><label>Last name *</label><input name="last_name" id="ln" required oninput="checkReturning()" /></div>
-          <div><label>Date of birth</label><input type="date" name="date_of_birth" id="dob" onchange="checkReturning()" /></div>
-          <div><label>Phone</label><input name="phone" id="ph" placeholder="04xx xxx xxx" oninput="checkReturning()" /></div>
-          <div class="full"><label>Email</label><input type="email" name="email" id="em" oninput="checkReturning()" /></div>
-          <div class="full"><label>Address</label><input name="address" /></div>
-          <div class="full"><label>Medicare number (optional)</label><input name="medicare_number" /></div>
+
+      <div id="details-block" style="display:none;">
+        <div class="divider"></div>
+        <h3 class="sub-heading" id="details-heading">Your details</h3>
+        <div id="return-banner" class="return-banner">
+          <h3>✓ We found your record</h3>
+          <p id="return-msg">Your details match an existing patient. Is this you?</p>
+          <div class="confirm">
+            <button type="button" class="yes" onclick="confirmReturning(true)">Yes, that's me</button>
+            <button type="button" onclick="confirmReturning(false)">No, I'm someone else</button>
+          </div>
         </div>
-      </form>
+        <form id="details-form">
+          <div class="grid">
+            <div><label>First name *</label><input name="first_name" id="fn" required oninput="checkReturning()" /></div>
+            <div><label>Last name *</label><input name="last_name" id="ln" required oninput="checkReturning()" /></div>
+            <div><label>Date of birth *</label><input type="date" name="date_of_birth" id="dob" onchange="checkReturning()" /></div>
+            <div><label>Mobile phone *</label><input name="phone" id="ph" placeholder="0400 000 000" oninput="checkReturning()" /></div>
+            <div class="full"><label>Email address</label><input type="email" name="email" id="em" placeholder="you@example.com" oninput="checkReturning()" /></div>
+            <div class="full"><label>Home address</label><input name="address" placeholder="Street, suburb, postcode" /></div>
+          </div>
+        </form>
+      </div>
     </div>
 
     <div class="card">
@@ -105,11 +151,22 @@
     </div>
 
     <div class="card">
-      <div class="step">Step 3 of 3 · Pick a time</div>
+      <div class="step">Step 3 of 3 · Pick a date & time</div>
       <h2>When works for you?</h2>
-      <div class="slot-section">
-        <div id="day-tabs" class="day-tabs"></div>
-        <div id="slots" class="slots"><div class="no-slots">Loading available times…</div></div>
+      <div class="cal-layout">
+        <div class="cal-month-section">
+          <div class="cal-month-header">
+            <button type="button" class="cal-nav-btn" id="prev-month" onclick="changeMonth(-1)">‹</button>
+            <span id="cal-month-label"></span>
+            <button type="button" class="cal-nav-btn" id="next-month" onclick="changeMonth(1)">›</button>
+          </div>
+          <div class="cal-dow-row"><div class="cal-dow">Mon</div><div class="cal-dow">Tue</div><div class="cal-dow">Wed</div><div class="cal-dow">Thu</div><div class="cal-dow">Fri</div><div class="cal-dow">Sat</div><div class="cal-dow">Sun</div></div>
+          <div class="cal-grid" id="cal-grid"></div>
+        </div>
+        <div class="cal-times-section">
+          <div id="day-selected-label" class="day-selected-label">Select a date to see times</div>
+          <div id="slots" class="slots"><div class="no-slots">Pick a date from the calendar</div></div>
+        </div>
       </div>
       <div class="divider"></div>
       <label>Symptoms / reason for visit (optional)</label>
@@ -132,11 +189,32 @@
   <div class="note">🔒 Your information is sent securely to the clinic.</div>
 </div>
 
+<div id="confirm-bar" class="confirm-bar">
+  <div id="confirm-label" class="confirm-label"></div>
+  <button class="btn btn-primary confirm-btn" onclick="submitForm()">Request →</button>
+</div>
+
 <script>
 const API = window.location.origin + '/api';
 let selectedType = null, selectedDate = null, selectedTime = null;
-let appointmentTypes = [], allSlots = [], isReturning = false;
+let appointmentTypes = [], allSlots = [], isReturning = false, priorAnswer = null;
 let returnDebounce = null;
+let calMonth = new Date(); calMonth.setDate(1);
+let availableByDate = {}; // date -> count of available slots
+
+// ---- Prior patient choice ----
+function setPrior(choice) {
+  priorAnswer = choice;
+  isReturning = (choice === 'returning');
+  document.getElementById('prior-new').classList.toggle('sel', choice === 'new');
+  document.getElementById('prior-returning').classList.toggle('sel', choice === 'returning');
+  document.getElementById('details-block').style.display = 'block';
+  document.getElementById('details-heading').textContent = choice === 'returning'
+    ? 'Confirm your details so we can find your record'
+    : 'Tell us about yourself';
+  // scroll to details
+  document.getElementById('details-block').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
 
 fetch(API + '/public/appointment-types').then(r => r.json()).then(types => {
   appointmentTypes = types;
@@ -155,36 +233,89 @@ function selectType(code) {
   document.querySelectorAll('.type-card').forEach(c => c.classList.toggle('sel', c.dataset.code === code));
 }
 
-fetch(API + '/public/availability/14').then(r => r.json()).then(slots => {
-  allSlots = slots; renderDays();
-}).catch(() => { document.getElementById('slots').innerHTML = '<div class="no-slots">Could not load availability.</div>'; });
+fetch(API + '/public/availability/45').then(r => r.json()).then(slots => {
+  allSlots = slots; initCalendar();
+}).catch(() => { document.getElementById('cal-grid').innerHTML = '<div class="no-slots">Could not load availability.</div>'; });
 
-function renderDays() {
-  const days = [...new Set(allSlots.map(s => s.date))];
-  const tabs = document.getElementById('day-tabs');
-  if (!days.length) { tabs.innerHTML = '<div class="no-slots">No upcoming availability.</div>'; return; }
-  tabs.innerHTML = days.map(d => {
-    const dt = new Date(d + 'T00:00');
-    return `<div class="day-tab" data-date="${d}" onclick="selectDay('${d}')">${dt.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}</div>`;
-  }).join('');
-  selectDay(days[0]);
+// ---- Month calendar ----
+function initCalendar() {
+  availableByDate = {};
+  allSlots.filter(s => s.available).forEach(s => {
+    availableByDate[s.date] = (availableByDate[s.date] || 0) + 1;
+  });
+  renderCalendar();
 }
 
-function selectDay(date) {
-  selectedDate = date;
-  document.querySelectorAll('.day-tab').forEach(t => t.classList.toggle('sel', t.dataset.date === date));
-  const daySlots = allSlots.filter(s => s.date === date);
+function renderCalendar() {
+  const year = calMonth.getFullYear();
+  const month = calMonth.getMonth();
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  document.getElementById('cal-month-label').textContent = `${monthNames[month]} ${year}`;
+
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  // Monday = 0
+  let startDow = firstDay.getDay() - 1; if (startDow < 0) startDow = 6;
+  const today = new Date(); today.setHours(0,0,0,0);
+
+  let html = '';
+  // leading blanks
+  for (let i = 0; i < startDow; i++) html += '<div class="cal-cell-empty"></div>';
+  for (let d = 1; d <= lastDay.getDate(); d++) {
+    const cellDate = new Date(year, month, d);
+    const ds = cellDate.toISOString().slice(0, 10);
+    const isPast = cellDate < today;
+    const isToday = ds === today.toISOString().slice(0, 10);
+    const avail = availableByDate[ds] || 0;
+    const hasSlots = avail > 0 && !isPast;
+    const cls = hasSlots ? 'cal-cell avail' : isPast ? 'cal-cell past' : 'cal-cell no-slots';
+    const selCls = selectedDate === ds ? ' selected' : '';
+    html += `<div class="${cls}${selCls}" ${hasSlots ? `onclick="selectCalDay('${ds}')"` : ''}>${d}${hasSlots ? `<span class="cal-dot"></span>` : ''}</div>`;
+  }
+  document.getElementById('cal-grid').innerHTML = html;
+}
+
+function changeMonth(dir) {
+  calMonth.setMonth(calMonth.getMonth() + dir);
+  renderCalendar();
+}
+
+function selectCalDay(ds) {
+  selectedDate = ds;
+  selectedTime = null;
+  updateConfirmBar();
+  renderCalendar(); // re-render to show selection
+  // update label
+  const dt = new Date(ds + 'T00:00');
+  document.getElementById('day-selected-label').textContent = dt.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' });
+  // show slots for this day — single clean grid, no morning/afternoon split
+  const daySlots = allSlots.filter(s => s.date === ds && s.available);
   const slotsEl = document.getElementById('slots');
-  if (!daySlots.length) { slotsEl.innerHTML = '<div class="no-slots">No availability this day.</div>'; return; }
-  slotsEl.innerHTML = daySlots.map(s => {
-    const timeLabel = new Date(s.date + 'T' + s.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    return `<div class="slot ${s.available ? '' : 'taken'}" data-time="${s.time}" onclick="${s.available ? `selectTime('${s.time}')` : ''}">${timeLabel}</div>`;
-  }).join('');
+  if (!daySlots.length) { slotsEl.innerHTML = '<div class="no-slots">No available times this day.</div>'; return; }
+  slotsEl.innerHTML = '<div class="slots-grid">' + daySlots.map(s => slotHtml(s)).join('') + '</div>';
+}
+
+function slotHtml(s) {
+  const timeLabel = new Date(s.date + 'T' + s.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `<div class="slot" data-time="${s.time}" onclick="selectTime('${s.time}')">${timeLabel}</div>`;
 }
 
 function selectTime(time) {
   selectedTime = time;
-  document.querySelectorAll('.slot').forEach(s => s.classList.toggle('sel', s.dataset.time === time && !s.classList.contains('taken')));
+  document.querySelectorAll('.slot').forEach(s => s.classList.toggle('sel', s.dataset.time === time));
+  updateConfirmBar();
+}
+
+function updateConfirmBar() {
+  const bar = document.getElementById('confirm-bar');
+  if (selectedDate && selectedTime) {
+    const dt = new Date(selectedDate + 'T' + selectedTime);
+    const label = dt.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' }) + ' · ' + dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    document.getElementById('confirm-label').textContent = label;
+    bar.classList.add('show');
+  } else {
+    bar.classList.remove('show');
+  }
 }
 
 function checkReturning() {
@@ -213,8 +344,13 @@ function checkReturning() {
   }, 600);
 }
 
-function hideReturn() { document.getElementById('return-banner').classList.remove('show'); isReturning = false; }
-function setReturning(v) { isReturning = v; document.getElementById('return-banner').style.opacity = v ? '0.6' : '1'; }
+function hideReturn() { document.getElementById('return-banner').classList.remove('show'); }
+function confirmReturning(v) {
+  isReturning = v;
+  const banner = document.getElementById('return-banner');
+  if (v) { banner.style.borderColor = 'var(--green)'; banner.querySelector('h3').textContent = '✓ Great, welcome back!'; }
+  else { hideReturn(); }
+}
 
 async function submitForm() {
   const errEl = document.getElementById('err'); errEl.textContent = '';

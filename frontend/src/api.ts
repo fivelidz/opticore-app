@@ -227,6 +227,16 @@ export interface AnalyticsOverview {
 export interface TimeSeriesPoint { date: string; value: number; }
 export interface WebsiteTrafficPoint { date: string; visitors: number; page_views: number; bookings: number; source: string; }
 export interface SourceBreakdown { source: string; visitors: number; bookings: number; }
+export interface RevenueByType { appointment_type: string; revenue: number; count: number; }
+export interface NoShowRate {
+  total: number; no_show: number; cancelled: number; completed: number;
+  no_show_rate: number; cancellation_rate: number;
+}
+export interface HourCount { hour: number; count: number; }
+export interface AgeBracket { bracket: string; count: number; }
+export interface OutstandingPatient {
+  patient_id: number; name: string; mrn: string; outstanding: number; invoice_count: number;
+}
 
 export const analytics = {
   overview: () => api.get<AnalyticsOverview>("/analytics/overview"),
@@ -234,6 +244,12 @@ export const analytics = {
   appointments: (days: number) => api.get<TimeSeriesPoint[]>(`/analytics/appointments/${days}`),
   traffic: (days: number) => api.get<WebsiteTrafficPoint[]>(`/analytics/traffic/${days}`),
   trafficBySource: () => api.get<SourceBreakdown[]>("/analytics/traffic-by-source"),
+  patientGrowth: (days: number) => api.get<TimeSeriesPoint[]>(`/analytics/patient-growth/${days}`),
+  revenueByType: () => api.get<RevenueByType[]>("/analytics/revenue-by-type"),
+  noShowRate: () => api.get<NoShowRate>("/analytics/no-show-rate"),
+  hourDistribution: () => api.get<HourCount[]>("/analytics/hour-distribution"),
+  ageDemographics: () => api.get<AgeBracket[]>("/analytics/age-demographics"),
+  outstandingByPatient: () => api.get<OutstandingPatient[]>("/analytics/outstanding-by-patient"),
 };
 
 // ---------- Intake (public input page submissions) ----------
@@ -303,4 +319,26 @@ export const photos = {
     api.post<PatientPhoto>(`/patients/${pid}/photos`, { patient_id: pid, ...body }),
   remove: (pid: number, photoId: number) => api.delete(`/patients/${pid}/photos/${photoId}`),
   makeProfile: (pid: number, photoId: number) => api.post(`/patients/${pid}/photos/${photoId}/make-profile`),
+};
+
+// ---------- Booking settings & notifications ----------
+
+export interface BookingSettings {
+  booking_mode: string; auto_confirm_message: boolean; auto_reminder_message: boolean;
+  reminder_hours_before: number; email_provider: string; email_from: string;
+  sms_provider: string; sms_sender: string;
+  template_booking_received: string; template_booking_confirmed: string;
+  template_booking_declined: string; template_reminder: string;
+}
+export interface BookingNotification {
+  id: number; booking_id?: number|null; intake_submission_id?: number|null;
+  channel: string; recipient: string; template_used?: string|null;
+  body: string; status: string; sent_at?: string|null; created_at: string;
+}
+export const bookingSettings = {
+  get: () => api.get<BookingSettings>("/booking-settings"),
+  update: (s: Partial<BookingSettings>) => api.put<BookingSettings>("/booking-settings", s),
+  notifications: () => api.get<BookingNotification[]>("/booking-notifications"),
+  approve: (id: number) => api.post(`/intake/${id}/approve`),
+  decline: (id: number) => api.post(`/intake/${id}/decline`),
 };

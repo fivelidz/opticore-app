@@ -299,7 +299,7 @@
     "POST /api/users/:id/toggle": (body, p) => { const u = DB.users.find(x => x.id === Number(p.id)); if (u) u.is_active = !u.is_active; return ok({ id: Number(p.id), is_active: u?.is_active }); },
     "DELETE /api/users/:id": (body, p) => { DB.users = DB.users.filter(u => u.id !== Number(p.id)); return ok({ message: "Deleted (demo)" }); },
 
-    "GET /api/patients/:id/photos": () => ok(DB.patient_photos.filter(p => p.patient_id === Number(arguments[1]?.id))),
+    "GET /api/patients/:id/photos": (body, p) => ok(DB.patient_photos.filter(photo => photo.patient_id === Number(p.id))),
     "POST /api/data/version": () => ok({ app_version: "0.1.0", snapshot_version: 1, supported_min_snapshot: 1 }),
   };
 
@@ -351,37 +351,89 @@
   };
 
   // Also intercept XMLHttpRequest (axios uses XHR by default)
-  const origOpen = XMLHttpRequest.prototype.open;
-  const origSend = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    this._mockMethod = method.toUpperCase();
-    this._mockUrl = url;
-    return origOpen.call(this, method, url, ...rest);
-  };
-  XMLHttpRequest.prototype.send = function (body) {
-    const match = matchRoute(this._mockMethod, this._mockUrl);
-    if (match) {
+  const RealXHR = window.XMLHttpRequest;
+  window.XMLHttpRequest = function () {
+    const xhr = new RealXHR();
+    const self = this;
+    // proxy properties
+    let _method, _url, _mockMatch;
+    let _listeners = {};
+    let _responseText = "";
+    let _status = 200;
+
+    this.readyState = 0;
+    this.status = 0;
+    this.response = "";
+    this.responseText = "";
+    this.onreadystatechange = null;
+    this.onload = null;
+    this.onerror = null;
+
+    this.open = function (method, url) {
+      _method = method.toUpperCase();
+      _url = url;
+      _mockMatch = matchRoute(_method, url);
+      if (!_mockMatch) { return xhr.open.apply(xhr, arguments); }
+    };
+    this.setRequestHeader = function () {
+      if (!_mockMatch) return xhr.setRequestHeader.apply(xhr, arguments);
+    };
+    this.getAllResponseHeaders = function () {
+      if (!_mockMatch) return xhr.getAllResponseHeaders();
+      return "content-type: application/json\r\n";
+    };
+    this.getResponseHeader = function (name) {
+      if (!_mockMatch) return xhr.getResponseHeader(name);
+      return name.toLowerCase() === "content-type" ? "application/json" : null;
+    };
+    this.addEventListener = function (type, cb) {
+      if (!_mockMatch) return xhr.addEventListener(type, cb);
+      _listeners[type] = _listeners[type] || [];
+      _listeners[type].push(cb);
+    };
+    this.removeEventListener = function (type, cb) {
+      if (!_mockMatch) return xhr.removeEventListener(type, cb);
+    };
+    Object.defineProperty(this, "responseURL", { get: () => _url, configurable: true });
+
+    this.send = function (body) {
+      if (!_mockMatch) {
+        // wire real xhr through
+        xhr.onreadystatechange = () => {
+          self.readyState = xhr.readyState; self.status = xhr.status;
+          self.response = xhr.response; self.responseText = xhr.responseText;
+          if (self.onreadystatechange) self.onreadystatechange();
+          if (xhr.readyState === 4 && self.onload) self.onload();
+        };
+        return xhr.send(body);
+      }
       const parsed = body ? JSON.parse(body) : {};
-      match.handler(parsed, match.pathParams).then(data => {
-        Object.defineProperty(this, "readyState", { value: 4, configurable: true });
-        Object.defineProperty(this, "status", { value: data.status, configurable: true });
-        Object.defineProperty(this, "response", { value: JSON.stringify(data.data), configurable: true });
-        Object.defineProperty(this, "responseText", { value: JSON.stringify(data.data), configurable: true });
-        if (this.onreadystatechange) this.onreadystatechange();
-        if (this.onload) this.onload();
+      Promise.resolve().then(() => _mockMatch.handler(parsed, _mockMatch.pathParams)).then(data => {
+        _responseText = JSON.stringify(data.data);
+        _status = data.status;
+        self.readyState = 4;
+        self.status = _status;
+        self.response = _responseText;
+        self.responseText = _responseText;
+        if (self.onreadystatechange) self.onreadystatechange();
+        (_listeners["load"] || []).forEach(cb => cb.call(self, { type: "load" }));
+        (_listeners["loadend"] || []).forEach(cb => cb.call(self, { type: "loadend" }));
+        if (self.onload) self.onload({ type: "load" });
       }).catch(err => {
         const status = err?.response?.status || 500;
         const data = err?.response?.data || { error: "Mock error" };
-        Object.defineProperty(this, "readyState", { value: 4, configurable: true });
-        Object.defineProperty(this, "status", { value: status, configurable: true });
-        Object.defineProperty(this, "response", { value: JSON.stringify(data), configurable: true });
-        Object.defineProperty(this, "responseText", { value: JSON.stringify(data), configurable: true });
-        if (this.onreadystatechange) this.onreadystatechange();
-        if (this.onload) this.onload();
+        _responseText = JSON.stringify(data);
+        self.readyState = 4;
+        self.status = status;
+        self.response = _responseText;
+        self.responseText = _responseText;
+        if (self.onreadystatechange) self.onreadystatechange();
+        (_listeners["load"] || []).forEach(cb => cb.call(self, { type: "load" }));
+        (_listeners["loadend"] || []).forEach(cb => cb.call(self, { type: "loadend" }));
+        if (self.onload) self.onload({ type: "load" });
       });
-      return;
-    }
-    return origSend.call(this, body);
+    };
+    this.abort = function () { if (!_mockMatch) xhr.abort(); };
   };
 
   console.log("✅ OptiCore demo mock API loaded — all endpoints intercepted");

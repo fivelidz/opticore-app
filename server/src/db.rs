@@ -22,6 +22,26 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     // Migrations are embedded at compile time.
     sqlx::migrate!("./migrations").run(pool).await.map_err(|e| anyhow!("migrate: {e}"))?;
     info!("✓ migrations applied");
+
+    // If CLEAN_START is set, wipe all demo/seed data so the app starts empty.
+    // This is used for production builds where you want a blank database.
+    if std::env::var("CLEAN_START").is_ok() {
+        info!("🧹 CLEAN_START: wiping demo data for fresh production start...");
+        let tables = [
+            "clinical_notes", "allergies", "osdi_scores", "ipl_treatments",
+            "invoice_items", "invoices", "payments", "appointments",
+            "blocked_times", "patient_photos", "intake_submissions",
+            "messages", "website_events", "patients",
+            // keep users (admin), consultation_types, services, booking_settings
+        ];
+        for t in &tables {
+            sqlx::query(&format!("DELETE FROM {}", t)).execute(pool).await?;
+        }
+        // reset the auto-increment counters
+        sqlx::query("DELETE FROM sqlite_sequence WHERE name IN ('patients','appointments','invoices','invoice_items','payments','clinical_notes','allergies','osdi_scores','ipl_treatments','blocked_times','intake_submissions','messages','website_events','patient_photos')").execute(pool).await?;
+        info!("✓ demo data cleared — app starts empty (only admin user + catalogs remain)");
+    }
+
     Ok(())
 }
 
