@@ -6,14 +6,18 @@ compatibility_date = "2024-09-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "opticore-bookings"
-database_id = "opticore-bookings-dev"
+database_id = "1094bf64-43ea-4b77-aada-4e2f058673e8"
 
 # KV for rate limiting / session
 [[kv_namespaces]]
 binding = "KV"
-id = "opticore-kv-dev"
+id = "28207b282ba743ce8aa7b3d71a1961cb"
 
 # Environment variables (set via wrangler secret for production)
 [vars]
 CLINIC_NAME = "OptiCore"
 TENANT_ID = "default"
+
+# Cron trigger — runs hourly to send appointment reminders
+[triggers]
+crons = ["0 * * * *"]

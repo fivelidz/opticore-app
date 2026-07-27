@@ -3,6 +3,10 @@ name = "server"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pms-server"
 path = "src/main.rs"

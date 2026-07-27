@@ -682,6 +682,7 @@ pub struct BookingSettings {
     pub sms_provider: String,
     pub sms_api_key: Option<String>,
     pub sms_sender: String,
+    pub sms_username: Option<String>,
     pub template_booking_received: String,
     pub template_booking_confirmed: String,
     pub template_booking_declined: String,
@@ -711,6 +712,8 @@ pub struct UpdateBookingSettings {
     pub sms_api_key: Option<String>,
     #[serde(default)]
     pub sms_sender: Option<String>,
+    #[serde(default)]
+    pub sms_username: Option<String>,
     #[serde(default)]
     pub template_booking_received: Option<String>,
     #[serde(default)]

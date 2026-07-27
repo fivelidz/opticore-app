@@ -29,6 +29,7 @@ fn row_to_settings(r: &sqlx::sqlite::SqliteRow) -> BookingSettings {
         sms_provider: r.get("sms_provider"),
         sms_api_key: r.get("sms_api_key"),
         sms_sender: r.get("sms_sender"),
+        sms_username: r.get("sms_username"),
         template_booking_received: r.get("template_booking_received"),
         template_booking_confirmed: r.get("template_booking_confirmed"),
         template_booking_declined: r.get("template_booking_declined"),
@@ -93,6 +94,7 @@ pub async fn update_settings(
     if b.sms_provider.is_some() { sets.push("sms_provider = ?"); }
     if b.sms_api_key.is_some() { sets.push("sms_api_key = ?"); }
     if b.sms_sender.is_some() { sets.push("sms_sender = ?"); }
+    if b.sms_username.is_some() { sets.push("sms_username = ?"); }
     if b.template_booking_received.is_some() { sets.push("template_booking_received = ?"); }
     if b.template_booking_confirmed.is_some() { sets.push("template_booking_confirmed = ?"); }
     if b.template_booking_declined.is_some() { sets.push("template_booking_declined = ?"); }
@@ -112,6 +114,7 @@ pub async fn update_settings(
         if let Some(v) = &b.sms_provider { q = q.bind(v); }
         if let Some(v) = &b.sms_api_key { q = q.bind(v); }
         if let Some(v) = &b.sms_sender { q = q.bind(v); }
+        if let Some(v) = &b.sms_username { q = q.bind(v); }
         if let Some(v) = &b.template_booking_received { q = q.bind(v); }
         if let Some(v) = &b.template_booking_confirmed { q = q.bind(v); }
         if let Some(v) = &b.template_booking_declined { q = q.bind(v); }
@@ -447,21 +450,21 @@ async fn send_sms(
     recipient: &str,
     body: &str,
 ) -> (&'static str, String) {
-    // ClickSend uses HTTP Basic auth (username:api_key). The username portion
-    // isn't stored separately here, so we use the sms_sender as a best-effort
-    // account identifier; the key carries the real credential.
+    // ClickSend uses HTTP Basic auth with (account_username, api_key).
+    // The username is the ClickSend account login (stored in sms_username).
+    let username = settings.sms_username.as_deref().unwrap_or("");
     let payload = serde_json::json!({
         "messages": [{
             "source": "opticore",
             "from": settings.sms_sender,
-            "to": recipient,
+            "to": normalise_phone(recipient),
             "body": body,
         }]
     });
 
     let res = client
         .post("https://rest.clicksend.com/v3/sms/send")
-        .basic_auth(&settings.sms_sender, Some(api_key))
+        .basic_auth(username, Some(api_key))
         .header("Content-Type", "application/json")
         .json(&payload)
         .send()
@@ -478,5 +481,20 @@ async fn send_sms(
             }
         }
         Err(e) => ("failed", e.to_string()),
+    }
+}
+
+/// Normalise an Australian phone number to E.164 format for ClickSend.
+/// "0412 345 678" → "+61412345678", "+61 412 345 678" → "+61412345678"
+fn normalise_phone(phone: &str) -> String {
+    let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.starts_with("0") {
+        format!("+61{}", &digits[1..])
+    } else if digits.starts_with("61") {
+        format!("+{}", digits)
+    } else if phone.starts_with("+") {
+        phone.to_string()
+    } else {
+        format!("+61{}", digits)
     }
 }

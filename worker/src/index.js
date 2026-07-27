@@ -271,4 +271,76 @@ export default {
 
     return json({ error: 'Not found' }, 404);
   },
+
+  // ---- Scheduled handler (cron) — sends day-before reminders ----
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(sendReminders(env));
+  },
 };
+
+/**
+ * Send reminder SMS/email for appointments happening tomorrow.
+ * Called hourly by Cloudflare cron — checks if any confirmed bookings are
+ * within the next 24h and sends a reminder if one hasn't been sent yet.
+ */
+async function sendReminders(env) {
+  // Get bookings confirmed for tomorrow that haven't had a reminder sent
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM bookings
+     WHERE status = 'confirmed'
+       AND preferred_date = date('now', '+1 day')
+       AND clinic_response NOT LIKE '%reminder_sent%'`
+  ).all();
+
+  if (!results.length) return;
+
+  const settings = await env.DB.prepare('SELECT * FROM booking_settings WHERE id = 1').first().catch(() => null);
+
+  for (const booking of results) {
+    const name = booking.first_name;
+    const time = booking.preferred_time || '';
+    const type = booking.appointment_type || 'appointment';
+    const tmpl = settings?.template_reminder || 'Reminder: {{name}}, appointment tomorrow at {{time}} ({{type}}). Reply STOP to opt out. — OptiCore';
+    const body = tmpl.replace(/\{\{name\}\}/g, name).replace(/\{\{time\}\}/g, time).replace(/\{\{type\}\}/g, type).replace(/\{\{date\}\}/g, booking.preferred_date || '');
+
+    // Send via SMS if phone available, else email
+    if (booking.phone && settings?.sms_api_key) {
+      try {
+        await sendClickSendSMS(env, booking.phone, body, settings);
+      } catch (e) { /* log but continue */ }
+    } else if (booking.email && settings?.email_api_key) {
+      try {
+        await sendPostmarkEmail(env, booking.email, 'Appointment Reminder', body, settings);
+      } catch (e) { /* log but continue */ }
+    }
+
+    // Mark reminder as sent
+    await env.DB.prepare('UPDATE bookings SET clinic_response = COALESCE(clinic_response, "") || "reminder_sent;" WHERE id = ?')
+      .bind(booking.id).run();
+  }
+}
+
+async function sendClickSendSMS(env, phone, body, settings) {
+  const username = settings.sms_username || '';
+  const apiKey = settings.sms_api_key;
+  const normalised = phone.replace(/\s|-/g, '').replace(/^0/, '+61');
+  await fetch('https://rest.clicksend.com/v3/sms/send', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Basic ' + btoa(username + ':' + apiKey),
+    },
+    body: JSON.stringify({ messages: [{ source: 'opticore', from: settings.sms_sender || 'OptiCore', to: normalised, body }] }),
+  });
+}
+
+async function sendPostmarkEmail(env, to, subject, body, settings) {
+  await fetch('https://api.postmarkapp.com/email', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Postmark-Server-Token': settings.email_api_key,
+    },
+    body: JSON.stringify({ From: settings.email_from || 'bookings@clinic.local', To: to, Subject: subject, TextBody: body }),
+  });
+}

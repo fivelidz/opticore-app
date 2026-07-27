@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OptiCore — Book Online</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --border:#2a313d; --text:#f0f2f6; --dim:#aab3c2; --accent:#5ba3fb; --green:#4ade80; --amber:#fbbf24; --red:#f87171; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:radial-gradient(circle at 50% 0%, #1a2030, var(--bg)); color:var(--text); min-height:100vh; padding:24px; line-height:1.5; }
+  .wrap { max-width:680px; margin:0 auto; }
+  .brand { text-align:center; margin-bottom:28px; }
+  .brand .logo { font-size:44px; }
+  .brand h1 { font-size:24px; margin-top:6px; font-weight:700; }
+  .brand p { color:var(--dim); font-size:15px; margin-top:4px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:28px; margin-bottom:16px; }
+  .step { font-size:12px; font-weight:700; color:var(--accent); letter-spacing:1px; text-transform:uppercase; margin-bottom:8px; }
+  h2 { font-size:20px; margin-bottom:18px; font-weight:700; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .full { grid-column:1/-1; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--text); margin-bottom:6px; }
+  input, select, textarea { width:100%; padding:12px 14px; border-radius:8px; border:1px solid var(--border); background:#0f1115; color:var(--text); font-family:inherit; font-size:15px; outline:none; }
+  input:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(91,163,251,0.2); }
+  textarea { resize:vertical; min-height:70px; }
+  .divider { height:1px; background:var(--border); margin:24px 0; }
+  .btn { width:100%; padding:14px; border-radius:8px; border:none; font-size:16px; font-weight:600; cursor:pointer; font-family:inherit; }
+  .btn-primary { background:var(--accent); color:white; }
+  .btn-primary:hover { filter:brightness(1.1); }
+  .btn-primary:disabled { opacity:0.5; cursor:not-allowed; }
+  .prior-choice { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .prior-btn { display:flex; flex-direction:column; align-items:center; text-align:center; gap:4px; padding:20px 16px; border:2px solid var(--border); border-radius:12px; background:#0f1115; color:var(--text); cursor:pointer; font-family:inherit; transition:all 0.15s; }
+  .prior-btn:hover { border-color:var(--accent); }
+  .prior-btn.sel { border-color:var(--accent); background:rgba(91,163,251,0.12); }
+  .prior-icon { font-size:28px; }
+  .prior-title { font-size:15px; font-weight:600; }
+  .prior-sub { font-size:12px; color:var(--dim); }
+  .type-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .type-card { padding:14px; border:1px solid var(--border); border-radius:8px; cursor:pointer; transition:all 0.15s; }
+  .type-card:hover { border-color:var(--accent); }
+  .type-card.sel { border-color:var(--accent); background:rgba(91,163,251,0.1); }
+  .type-name { font-weight:600; font-size:14px; }
+  .type-meta { font-size:12px; color:var(--dim); margin-top:4px; }
+  .type-price { font-size:16px; font-weight:700; color:var(--green); margin-top:6px; }
+  .cal-layout { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  .cal-month-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; font-weight:600; font-size:15px; }
+  .cal-nav-btn { background:var(--card); border:1px solid var(--border); color:var(--text); width:32px; height:32px; border-radius:8px; cursor:pointer; font-size:18px; }
+  .cal-dow-row { display:grid; grid-template-columns:repeat(7,1fr); gap:3px; margin-bottom:6px; }
+  .cal-dow { font-size:12px; font-weight:700; color:var(--text); text-align:center; padding:6px 0; text-transform:uppercase; }
+  .cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:3px; }
+  .cal-cell { aspect-ratio:1; display:flex; align-items:center; justify-content:center; border-radius:10px; font-size:18px; font-weight:600; cursor:default; position:relative; color:var(--dim); min-height:48px; }
+  .cal-cell-empty { aspect-ratio:1; }
+  .cal-cell.past { opacity:0.25; }
+  .cal-cell.no-slots { opacity:0.35; }
+  .cal-cell.avail { cursor:pointer; color:var(--text); background:rgba(91,163,251,0.1); font-weight:600; }
+  .cal-cell.avail:hover { background:rgba(91,163,251,0.25); }
+  .cal-cell.avail.selected { background:var(--accent); color:white; font-weight:700; }
+  .cal-dot { position:absolute; bottom:5px; width:5px; height:5px; border-radius:50%; background:var(--green); }
+  .cal-cell.avail.selected .cal-dot { background:white; }
+  .cal-times-section { min-height:200px; }
+  .day-selected-label { font-size:15px; font-weight:600; color:var(--accent); margin-bottom:14px; }
+  .slots-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+  .slot { padding:18px 12px; text-align:center; border:2px solid var(--border); border-radius:12px; cursor:pointer; font-size:18px; font-weight:700; transition:all 0.12s; color:var(--text); background:#0f1115; min-height:56px; display:flex; align-items:center; justify-content:center; }
+  .slot:hover { border-color:var(--accent); transform:scale(1.03); }
+  .slot.sel { background:var(--accent); color:white; border-color:var(--accent); transform:scale(1.03); }
+  .no-slots { color:var(--dim); font-size:14px; padding:16px; text-align:center; }
+  .confirm-bar { position:fixed; bottom:0; left:0; right:0; max-width:680px; margin:0 auto; background:var(--card); border-top:1px solid var(--accent); padding:14px 20px; padding-bottom:calc(14px + env(safe-area-inset-bottom,0px)); display:none; align-items:center; gap:14px; box-shadow:0 -4px 20px rgba(0,0,0,0.4); z-index:50; }
+  .confirm-bar.show { display:flex; }
+  .confirm-label { flex:1; font-size:15px; font-weight:600; }
+  .confirm-btn { width:auto; padding:12px 24px; white-space:nowrap; }
+  .success { text-align:center; padding:40px 20px; display:none; }
+  .success.show { display:block; }
+  .success .check { font-size:56px; color:var(--green); }
+  .success h2 { margin:12px 0 8px; }
+  .success p { color:var(--dim); font-size:15px; }
+  .err { color:var(--red); font-size:14px; margin-top:12px; text-align:center; }
+  .note { font-size:13px; color:var(--dim); margin-top:16px; text-align:center; }
+  @media (max-width:600px) { .cal-layout { grid-template-columns:1fr; } .wrap { padding-bottom:90px; } }
+  @media (max-width:520px) { .grid, .type-grid, .prior-choice { grid-template-columns:1fr; } .card { padding:20px; } body { padding:16px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">
+    <div class="logo">👁️</div>
+    <h1>OptiCore</h1>
+    <p>Request an appointment online</p>
+  </div>
+
+  <div id="form-card">
+    <div class="card">
+      <div class="step">Step 1 of 3 · About you</div>
+      <h2>Have you visited us before?</h2>
+      <div class="prior-choice">
+        <button type="button" class="prior-btn" id="prior-new" onclick="setPrior('new')">
+          <span class="prior-icon">✨</span><span class="prior-title">I'm a new patient</span><span class="prior-sub">This is my first visit</span>
+        </button>
+        <button type="button" class="prior-btn" id="prior-returning" onclick="setPrior('returning')">
+          <span class="prior-icon">👋</span><span class="prior-title">I've been here before</span><span class="prior-sub">I'm an existing patient</span>
+        </button>
+      </div>
+      <div id="details-block" style="display:none;">
+        <div class="divider"></div>
+        <h3 style="font-size:15px;font-weight:600;margin-bottom:16px;" id="details-heading">Your details</h3>
+        <form id="details-form">
+          <div class="grid">
+            <div><label>First name *</label><input name="first_name" id="fn" required /></div>
+            <div><label>Last name *</label><input name="last_name" id="ln" required /></div>
+            <div><label>Date of birth *</label><input type="date" name="date_of_birth" id="dob" /></div>
+            <div><label>Mobile phone *</label><input name="phone" id="ph" placeholder="0400 000 000" /></div>
+            <div class="full"><label>Email address</label><input type="email" name="email" id="em" placeholder="you@example.com" /></div>
+            <div class="full"><label>Home address</label><input name="address" placeholder="Street, suburb, postcode" /></div>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="step">Step 2 of 3 · Appointment type</div>
+      <h2>What would you like to book?</h2>
+      <div id="type-grid" class="type-grid"><div class="no-slots">Loading…</div></div>
+    </div>
+
+    <div class="card">
+      <div class="step">Step 3 of 3 · Pick a date & time</div>
+      <h2>When works for you?</h2>
+      <div class="cal-layout">
+        <div>
+          <div class="cal-month-header">
+            <button type="button" class="cal-nav-btn" onclick="changeMonth(-1)">‹</button>
+            <span id="cal-month-label"></span>
+            <button type="button" class="cal-nav-btn" onclick="changeMonth(1)">›</button>
+          </div>
+          <div class="cal-dow-row"><div class="cal-dow">Mon</div><div class="cal-dow">Tue</div><div class="cal-dow">Wed</div><div class="cal-dow">Thu</div><div class="cal-dow">Fri</div><div class="cal-dow">Sat</div><div class="cal-dow">Sun</div></div>
+          <div class="cal-grid" id="cal-grid"></div>
+        </div>
+        <div class="cal-times-section">
+          <div id="day-selected-label" class="day-selected-label">Select a date to see times</div>
+          <div id="slots"><div class="no-slots">Pick a date from the calendar</div></div>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <label>Symptoms / reason for visit (optional)</label>
+      <textarea id="symptoms" placeholder="Briefly describe what you're experiencing..."></textarea>
+    </div>
+  </div>
+
+  <div class="card success" id="success-card">
+    <div class="check">✓</div>
+    <h2>Thank you!</h2>
+    <p id="success-msg">Your appointment request has been received. We'll confirm shortly.</p>
+    <button class="btn btn-primary" style="margin-top:24px" onclick="location.reload()">Book another</button>
+  </div>
+
+  <div class="note">🔒 Your information is sent securely.</div>
+</div>
+
+<div id="confirm-bar" class="confirm-bar">
+  <div id="confirm-label" class="confirm-label"></div>
+  <button class="btn btn-primary confirm-btn" onclick="submitForm()">Request →</button>
+</div>
+
+<script>
+const API = 'https://opticore-booking.fivelidz.workers.dev/api';
+let selectedType = null, selectedDate = null, selectedTime = null, isReturning = false, priorAnswer = null;
+let appointmentTypes = [], allSlots = [];
+let calMonth = new Date(); calMonth.setDate(1);
+let availableByDate = {};
+
+// Load appointment types
+fetch(API + '/public/appointment-types').then(r => r.json()).then(types => {
+  appointmentTypes = types;
+  document.getElementById('type-grid').innerHTML = types.map(t =>
+    `<div class="type-card" data-code="${t.code}" onclick="selectType('${t.code}')"><div class="type-name">${t.name}</div><div class="type-meta">${t.duration} min${t.description ? ' · ' + t.description : ''}</div><div class="type-price">$${t.price}</div></div>`
+  ).join('');
+}).catch(() => { document.getElementById('type-grid').innerHTML = '<div class="no-slots">Could not load. Please call us.</div>'; });
+
+function selectType(code) { selectedType = code; document.querySelectorAll('.type-card').forEach(c => c.classList.toggle('sel', c.dataset.code === code)); }
+
+// Load availability
+fetch(API + '/public/availability?days=45').then(r => r.json()).then(slots => { allSlots = slots; initCalendar(); }).catch(() => {});
+
+function setPrior(choice) {
+  priorAnswer = choice; isReturning = (choice === 'returning');
+  document.getElementById('prior-new').classList.toggle('sel', choice === 'new');
+  document.getElementById('prior-returning').classList.toggle('sel', choice === 'returning');
+  document.getElementById('details-block').style.display = 'block';
+  document.getElementById('details-heading').textContent = choice === 'returning' ? 'Confirm your details' : 'Tell us about yourself';
+}
+
+function initCalendar() {
+  availableByDate = {};
+  allSlots.forEach(s => { if (s.available) availableByDate[s.date] = (availableByDate[s.date] || 0) + 1; });
+  renderCalendar();
+}
+
+function renderCalendar() {
+  const y = calMonth.getFullYear(), m = calMonth.getMonth();
+  const names = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  document.getElementById('cal-month-label').textContent = names[m] + ' ' + y;
+  const firstDay = new Date(y, m, 1), lastDay = new Date(y, m+1, 0);
+  let startDow = firstDay.getDay() - 1; if (startDow < 0) startDow = 6;
+  const today = new Date(); today.setHours(0,0,0,0);
+  let html = '';
+  for (let i = 0; i < startDow; i++) html += '<div class="cal-cell-empty"></div>';
+  for (let d = 1; d <= lastDay.getDate(); d++) {
+    const cd = new Date(y, m, d), ds = cd.toISOString().slice(0,10);
+    const isPast = cd < today, has = availableByDate[ds] > 0 && !isPast;
+    const cls = has ? 'cal-cell avail' : isPast ? 'cal-cell past' : 'cal-cell no-slots';
+    const sel = selectedDate === ds ? ' selected' : '';
+    html += `<div class="${cls}${sel}" ${has ? `onclick="selectCalDay('${ds}')"` : ''}>${d}${has ? '<span class="cal-dot"></span>' : ''}</div>`;
+  }
+  document.getElementById('cal-grid').innerHTML = html;
+}
+
+function changeMonth(dir) { calMonth.setMonth(calMonth.getMonth() + dir); renderCalendar(); }
+
+function selectCalDay(ds) {
+  selectedDate = ds; selectedTime = null; updateConfirmBar(); renderCalendar();
+  const dt = new Date(ds + 'T00:00');
+  document.getElementById('day-selected-label').textContent = dt.toLocaleDateString([], { weekday:'long', day:'numeric', month:'long' });
+  const daySlots = allSlots.filter(s => s.date === ds && s.available);
+  const el = document.getElementById('slots');
+  if (!daySlots.length) { el.innerHTML = '<div class="no-slots">No available times.</div>'; return; }
+  el.innerHTML = '<div class="slots-grid">' + daySlots.map(s => {
+    const tl = new Date(s.date + 'T' + s.time).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+    return `<div class="slot" data-time="${s.time}" onclick="selectTime('${s.time}')">${tl}</div>`;
+  }).join('') + '</div>';
+}
+
+function selectTime(t) { selectedTime = t; document.querySelectorAll('.slot').forEach(s => s.classList.toggle('sel', s.dataset.time === t)); updateConfirmBar(); }
+
+function updateConfirmBar() {
+  const bar = document.getElementById('confirm-bar');
+  if (selectedDate && selectedTime) {
+    const dt = new Date(selectedDate + 'T' + selectedTime);
+    document.getElementById('confirm-label').textContent = dt.toLocaleDateString([], { weekday:'short', day:'numeric', month:'short' }) + ' · ' + dt.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+    bar.classList.add('show');
+  } else { bar.classList.remove('show'); }
+}
+
+async function submitForm() {
+  const errEl = document.getElementById('err'); if (errEl) errEl.textContent = '';
+  const data = Object.fromEntries(new FormData(document.getElementById('details-form')));
+  if (!data.first_name || !data.last_name) { alert('Please enter your name.'); return; }
+  if (!selectedType) { alert('Please choose an appointment type.'); return; }
+  if (!selectedDate || !selectedTime) { alert('Please pick a time.'); return; }
+  const btn = document.querySelector('.confirm-btn'); btn.disabled = true; btn.textContent = 'Submitting…';
+  try {
+    const res = await fetch(API + '/public/book', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...data, preferred_date: selectedDate, preferred_time: selectedTime,
+        appointment_type: appointmentTypes.find(t => t.code === selectedType)?.name || selectedType,
+        symptoms: document.getElementById('symptoms').value, is_returning: isReturning })
+    });
+    if (!res.ok) throw new Error('(' + res.status + ')');
+    document.getElementById('form-card').style.display = 'none';
+    document.getElementById('success-card').classList.add('show');
+    document.getElementById('success-msg').textContent = `Thank you ${data.first_name}! Your request for ${selectedDate} at ${selectedTime} has been received. We'll confirm shortly.`;
+  } catch (e) {
+    alert('Sorry, something went wrong. Please call us.');
+    btn.disabled = false; btn.textContent = 'Request →';
+  }
+}
+</script>
+</body>
+</html>
