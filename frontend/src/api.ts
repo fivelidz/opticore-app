@@ -1,11 +1,22 @@
 import axios from "axios";
 
-// API base: in Tauri dev/prod the server runs on localhost:3000.
-// In plain Vite dev, the proxy in vite.config.ts forwards /api -> :3000.
+// API base URL:
+// - VITE_API_URL override (explicit, used by the web demo mock)
+// - In the Tauri desktop app, the embedded server is on localhost:3000.
+//   The Tauri webview serves pages via tauri:// or https://tauri.localhost,
+//   so we detect "not a normal http dev server" and point at localhost:3000.
+// - In Vite dev (http://localhost:5173), use empty baseURL (proxy handles it).
+const isTauriApp = typeof window !== "undefined" &&
+  (window.location.protocol.startsWith("tauri") ||
+   window.location.hostname === "tauri.localhost" ||
+   (window.location.protocol !== "http:" && window.location.protocol !== "https:"));
+
+const isDevServer = typeof window !== "undefined" &&
+  window.location.hostname === "localhost" && window.location.port === "5173";
+
 const baseURL =
   (import.meta as any).env?.VITE_API_URL ||
-  (typeof window !== "undefined" && (window as any).__TAURI__ ? "http://localhost:3000" : "") ||
-  "";
+  (isTauriApp ? "http://localhost:3000" : isDevServer ? "" : "http://localhost:3000");
 
 export const api = axios.create({ baseURL: baseURL + "/api", timeout: 15000 });
 
@@ -23,7 +34,10 @@ api.interceptors.response.use(
     if (err?.response?.status === 401) {
       localStorage.removeItem("pms_token");
       localStorage.removeItem("pms_user");
-      if (location.pathname !== "/login") location.href = "/login";
+      // Use hash routing (works in both browser and Tauri webview)
+      if (!window.location.hash.includes("/login")) {
+        window.location.hash = "#/login";
+      }
     }
     return Promise.reject(err);
   }

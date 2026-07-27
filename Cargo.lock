@@ -3624,7 +3624,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3689,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "serde",
@@ -4285,7 +4285,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
