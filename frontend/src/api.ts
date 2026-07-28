@@ -321,7 +321,7 @@ export const users = {
 // ---------- Patient photos / files ----------
 
 export interface PatientPhoto {
-  id: number; patient_id: number; category: string; filename: string;
+  id: number; patient_id: number; appointment_id?: number | null; category: string; filename: string;
   mime_type: string; caption?: string | null; file_size?: number | null;
   captured_at: string; created_at: string;
 }
@@ -333,6 +333,15 @@ export const photos = {
     api.post<PatientPhoto>(`/patients/${pid}/photos`, { patient_id: pid, ...body }),
   remove: (pid: number, photoId: number) => api.delete(`/patients/${pid}/photos/${photoId}`),
   makeProfile: (pid: number, photoId: number) => api.post(`/patients/${pid}/photos/${photoId}/make-profile`),
+};
+
+// ---------- Appointment attachments (documents & photos on a visit's notes) ----------
+export const attachments = {
+  list: (apptId: number) => api.get<PatientPhoto[]>(`/appointments/${apptId}/attachments`),
+  getData: (apptId: number, photoId: number) => api.get<{ data: string; mime: string }>(`/appointments/${apptId}/attachments/${photoId}`),
+  upload: (apptId: number, body: { category?: string; filename: string; mime_type: string; caption?: string; data_base64: string }) =>
+    api.post<PatientPhoto>(`/appointments/${apptId}/attachments`, { patient_id: 0, category: "document", ...body }),
+  remove: (apptId: number, photoId: number) => api.delete(`/appointments/${apptId}/attachments/${photoId}`),
 };
 
 // ---------- Booking settings & notifications ----------

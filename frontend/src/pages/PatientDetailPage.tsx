@@ -4,6 +4,7 @@ import {
   patientDetail, clinical, billing, appointments as apptApi, patients as patApi, photos as photoApi,
   type PatientDetail as PDetail, type PatientPhoto,
 } from "../api";
+import { ApptAttachments } from "./CalendarPage";
 
 // ---------- Auto-expanding textarea ----------
 // Grows in height as text is added: sets height=auto then height=scrollHeight.
@@ -416,6 +417,7 @@ function AppointmentRow({ appt, onChanged }: { appt: PDetail["appointments"][0];
               </>
             )}
           </div>
+          <ApptAttachments appointmentId={appt.id} compact />
           <div className="appt-h-actions">
             {appt.status === "scheduled" && <button className="mini" onClick={async () => { await apptApi.update(appt.id, { appointment_type: appt.appointment_type, appointment_date: appt.appointment_date, duration_minutes: appt.duration_minutes, practitioner: appt.practitioner || undefined, status: "completed", notes: appt.notes || undefined }); onChanged(); }}>✓ Mark completed</button>}
             {appt.status === "scheduled" && <button className="mini danger" onClick={async () => { await apptApi.update(appt.id, { appointment_type: appt.appointment_type, appointment_date: appt.appointment_date, duration_minutes: appt.duration_minutes, practitioner: appt.practitioner || undefined, status: "cancelled", notes: appt.notes || undefined }); onChanged(); }}>✕ Cancel</button>}

@@ -655,6 +655,8 @@ pub struct UpdateUser {
 pub struct PatientPhoto {
     pub id: i64,
     pub patient_id: i64,
+    /// When set, this file is attached to a specific appointment's notes.
+    pub appointment_id: Option<i64>,
     pub category: String, // profile | medical | document
     pub filename: String,
     pub mime_type: String,
@@ -666,7 +668,12 @@ pub struct PatientPhoto {
 
 #[derive(Debug, Deserialize)]
 pub struct UploadPhoto {
+    /// Resolved from the URL/appointment for appointment uploads, so optional in the body.
+    #[serde(default)]
     pub patient_id: i64,
+    /// Optional: attach this file to a specific appointment.
+    #[serde(default)]
+    pub appointment_id: Option<i64>,
     #[serde(default = "default_photo_category")]
     pub category: String,
     pub filename: String,

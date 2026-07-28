@@ -7,7 +7,8 @@ import {
 } from "date-fns";
 import {
   calendar, blockedTimes, appointments as apptApi, patients as patApi, patientDetail,
-  type CalendarEvent, type Patient, type PatientDetail,
+  attachments as attApi,
+  type CalendarEvent, type Patient, type PatientDetail, type PatientPhoto,
 } from "../api";
 
 type View = "month" | "week" | "day";
@@ -489,6 +490,7 @@ function SidePanel({ ev, onClose, onOpenPatient }: { ev: CalendarEvent; onClose:
           )}
         </div>
       )}
+      {ev.kind === "appointment" && <ApptAttachments appointmentId={ev.id} />}
       <div className="sp-bottom-actions">
         {ev.kind === "appointment" && ev.status !== "cancelled" && <button className="btn-ghost sp-act" onClick={cancel}>✕ Cancel {ev.kind}</button>}
         <button className="btn-danger sp-act" onClick={del}>🗑 Delete</button>
@@ -580,6 +582,102 @@ function BlockBody({ start, end, onClose, onSaved }: any) {
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
         <button className="btn-primary" onClick={save} disabled={saving || !reason}>{saving ? "Blocking…" : "🚫 Block Time"}</button>
       </div>
+    </div>
+  );
+}
+
+// ============ APPOINTMENT ATTACHMENTS (documents & photos) ============
+// Reusable panel: lists files attached to an appointment, lets you add photos or
+// documents, view/download them, and remove them. Works for current AND prior
+// appointments (any appointment id). Files are stored on the patient's record and
+// linked to this specific visit.
+export function ApptAttachments({ appointmentId, compact }: { appointmentId: number; compact?: boolean }) {
+  const [items, setItems] = useState<PatientPhoto[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const load = () => attApi.list(appointmentId).then((r) => setItems(r.data)).catch(() => setItems([]));
+  useEffect(() => { if (open) load(); }, [appointmentId, open]);
+
+  const onPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setBusy(true);
+    try {
+      for (const f of files) {
+        if (f.size > 10 * 1024 * 1024) { alert(`${f.name} is larger than 10MB and was skipped.`); continue; }
+        const data_base64 = await new Promise<string>((res, rej) => {
+          const reader = new FileReader();
+          reader.onload = () => res(String(reader.result).split(",")[1] || "");
+          reader.onerror = rej;
+          reader.readAsDataURL(f);
+        });
+        const isImage = f.type.startsWith("image/");
+        await attApi.upload(appointmentId, {
+          category: isImage ? "medical" : "document",
+          filename: f.name,
+          mime_type: f.type || "application/octet-stream",
+          data_base64,
+        });
+      }
+      await load();
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const view = async (p: PatientPhoto) => {
+    const r = await attApi.getData(appointmentId, p.id);
+    const bin = atob(r.data.data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const blob = new Blob([bytes], { type: r.data.mime || p.mime_type });
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank");
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
+
+  const remove = async (p: PatientPhoto) => {
+    if (!confirm(`Remove ${p.filename}?`)) return;
+    await attApi.remove(appointmentId, p.id);
+    await load();
+  };
+
+  return (
+    <div className={compact ? "att-box att-compact" : "att-box"}>
+      <div className="sp-sub att-head" onClick={() => setOpen(!open)}>
+        📎 Documents & Photos {items.length > 0 && <span className="att-count">{items.length}</span>} {open ? "▲" : "▼"}
+      </div>
+      {open && (
+        <>
+          {items.length === 0 && <div className="muted att-empty">No files attached to this visit yet.</div>}
+          {items.map((p) => (
+            <div key={p.id} className="att-row">
+              <span className="att-icon">{p.mime_type.startsWith("image/") ? "🖼️" : "📄"}</span>
+              <button className="att-name" title={p.filename} onClick={() => view(p)}>{p.filename}</button>
+              <button className="att-del" title="Remove" onClick={() => remove(p)}>×</button>
+            </div>
+          ))}
+          <input ref={fileRef} type="file" multiple accept="image/*,application/pdf,.doc,.docx,.txt" style={{ display: "none" }} onChange={onPick} />
+          <button className="btn-ghost att-add" disabled={busy} onClick={() => fileRef.current?.click()}>
+            {busy ? "Uploading…" : "＋ Add photo or document"}
+          </button>
+        </>
+      )}
+      <style>{`
+        .att-box { margin-top: 14px; }
+        .att-head { cursor: pointer; display: flex; align-items: center; gap: 6px; }
+        .att-count { background: var(--accent, #2563eb); color: #fff; border-radius: 999px; font-size: 10px; padding: 0 6px; font-weight: 700; }
+        .att-empty { font-size: 12px; margin: 6px 0; }
+        .att-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+        .att-icon { flex-shrink: 0; }
+        .att-name { flex: 1; text-align: left; background: none; color: var(--accent, #2563eb); text-decoration: underline; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; padding: 0; }
+        .att-del { background: none; color: var(--text-dim); font-size: 18px; line-height: 1; padding: 0 4px; cursor: pointer; }
+        .att-del:hover { color: var(--danger, #dc2626); }
+        .att-add { margin-top: 8px; width: 100%; font-size: 13px; }
+      `}</style>
     </div>
   );
 }

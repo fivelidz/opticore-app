@@ -85,6 +85,8 @@ pub async fn run() -> Result<()> {
         .route("/api/appointments", get(routes::appointments::list).post(routes::appointments::create))
         .route("/api/appointments/today", get(routes::appointments::today))
         .route("/api/appointments/:id", get(routes::appointments::get_one).put(routes::appointments::update).delete(routes::appointments::delete))
+        .route("/api/appointments/:id/attachments", get(routes::photos::list_by_appointment).post(routes::photos::upload_to_appointment))
+        .route("/api/appointments/:id/attachments/:photo", axum::routing::get(routes::photos::get_appointment_data).delete(routes::photos::delete_appointment_attachment))
         .route("/api/blocked-times", get(routes::blocked::list).post(routes::blocked::create))
         .route("/api/blocked-times/:id", axum::routing::put(routes::blocked::update).delete(routes::blocked::delete))
         .route("/api/calendar/:from/:to", get(routes::calendar::range))
