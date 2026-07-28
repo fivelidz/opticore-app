@@ -3,7 +3,7 @@ members = ["server", "shared", "tauri-app"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = ["Mosman Dry Eye Clinic <info@mymosmaneyecare.com.au>"]
 license = "Proprietary"

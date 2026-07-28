@@ -66,7 +66,7 @@ export function Patients() {
   };
 
   const fmtDt = (s?: string) => s ? new Date(s).toLocaleDateString([], { day: "2-digit", month: "short" }) : "—";
-  const fmtTime = (s?: string) => s ? new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  const fmtTime = (s?: string) => s ? new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "";
 
   return (
     <div>

@@ -383,7 +383,7 @@ function AppointmentRow({ appt, onChanged }: { appt: PDetail["appointments"][0];
   return (
     <div className={`appt-h-row ${expanded ? "open" : ""}`}>
       <div className="appt-h-head" onClick={() => setExpanded(!expanded)}>
-        <span className="appt-h-date">{dt.toLocaleDateString()} <span className="muted">{dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></span>
+        <span className="appt-h-date">{dt.toLocaleDateString()} <span className="muted">{dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</span></span>
         <span className="appt-h-type"><strong>{appt.appointment_type}</strong></span>
         <span className="muted">{appt.duration_minutes}m</span>
         {appt.practitioner && <span className="muted">{appt.practitioner}</span>}

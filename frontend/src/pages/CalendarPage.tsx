@@ -168,7 +168,7 @@ function MonthView({ cursor, evByDay, onDayClick, onEventClick, editMode }: any)
               <div className="mevs">
                 {evs.map((e: CalendarEvent) => (
                   <div key={e.id} className={`mpill ev-${e.kind} ${e.status || ""}`} onClick={(ev) => { ev.stopPropagation(); onEventClick(e); }}>
-                    <span className="mpill-time">{format(parseISO(e.start_at.replace(" ", "T")), "h:mma")}</span>
+                    <span className="mpill-time">{format(parseISO(e.start_at.replace(" ", "T")), "HH:mm")}</span>
                     <span className="mpill-title">{e.title}</span>
                   </div>
                 ))}
@@ -267,7 +267,7 @@ function WeekRow({ hour, days, evByDay, onDown, onMove, onUp, drag, onEventClick
   const PX_PER_MIN = 1.4; // 84px/hour — durations clearly visible
   return (
     <>
-      <div className="week-time">{format(new Date().setHours(hour, 0), "h a")}</div>
+      <div className="week-time">{format(new Date().setHours(hour, 0), "HH:mm")}</div>
       {days.map((d: Date, dayIdx: number) => {
         const evs = evByDay(d).filter((e: CalendarEvent) => parseISO(e.start_at.replace(" ", "T")).getHours() === hour);
         const showDrag = drag && drag.dayIdx === dayIdx && drag.startMin >= (hour - 7) * 60 && drag.startMin < (hour - 6) * 60;
@@ -289,11 +289,11 @@ function WeekRow({ hour, days, evByDay, onDown, onMove, onUp, drag, onEventClick
                   style={{ top, height }}
                   onMouseDown={(ev) => startMove(e, ev)}
                   onClick={(ev) => { if (!editMode) { ev.stopPropagation(); onEventClick(e); } }}
-                  title={editMode ? "Drag to reschedule" : `${e.title} — ${format(start,"h:mma")}–${format(end,"h:mma")} (${dur}min)`}
+                  title={editMode ? "Drag to reschedule" : `${e.title} — ${format(start,"HH:mm")}–${format(end,"HH:mm")} (${dur}min)`}
                 >
-                  <div className="ev-time">{format(start, "h:mma")}<span className="ev-dur"> · {dur}m</span></div>
+                  <div className="ev-time">{format(start, "HH:mm")}<span className="ev-dur"> · {dur}m</span></div>
                   <div className="ev-title">{e.title}</div>
-                  {height > 44 && <div className="ev-end">→ {format(end, "h:mma")}</div>}
+                  {height > 44 && <div className="ev-end">→ {format(end, "HH:mm")}</div>}
                   {e.paid === "paid" && <span className="ev-paid ok" title="Paid in full">✓ Paid</span>}
                   {e.paid === "partial" && <span className="ev-paid part" title={`Outstanding: $${(e.balance||0).toFixed(2)}`}>⚠ $${(e.balance||0).toFixed(0)} due</span>}
                 </div>
@@ -301,7 +301,7 @@ function WeekRow({ hour, days, evByDay, onDown, onMove, onUp, drag, onEventClick
             })}
             {showDrag && (
               <div className="ev ev-draft" style={{ top: (drag.startMin % 60) * PX_PER_MIN, height: (drag.endMin - drag.startMin) * PX_PER_MIN }}>
-                <div className="ev-time">{format(addMinutes(setHour(d, 7), drag.startMin), "h:mma")}</div>
+                <div className="ev-time">{format(addMinutes(setHour(d, 7), drag.startMin), "HH:mm")}</div>
                 <div>+ New</div>
               </div>
             )}
@@ -340,7 +340,7 @@ function DayView({ cursor, events, onEventClick, onCreate, editMode, onMove }: a
           const showHover = moving && hoverMin !== null && hoverMin >= (h - 7) * 60 && hoverMin < (h - 6) * 60;
           return (
             <div key={h} className="day-row">
-              <div className="day-time">{format(new Date().setHours(h, 0), "h a")}</div>
+              <div className="day-time">{format(new Date().setHours(h, 0), "HH:mm")}</div>
               <div className="day-cell"
                 onMouseDown={(e) => { if (editMode) { const s = absMin(h, e.clientY - e.currentTarget.getBoundingClientRect().top); setDrag({ startMin: s, endMin: s + 30 }); } }}
                 onMouseMove={(e) => {
@@ -363,11 +363,11 @@ function DayView({ cursor, events, onEventClick, onCreate, editMode, onMove }: a
                       style={{ top: start.getMinutes() * PX_PER_MIN, height }}
                       onMouseDown={(ev) => { if (editMode) { ev.stopPropagation(); const r = ev.currentTarget.getBoundingClientRect(); setMoving({ ev: e, offsetMin: minInCell(ev.clientY - r.top) }); } }}
                       onClick={(ev) => { if (!editMode) { ev.stopPropagation(); onEventClick(e); } }}
-                      title={`${e.title} — ${format(start,"h:mma")}–${format(end,"h:mma")} (${dur}min)`}
+                      title={`${e.title} — ${format(start,"HH:mm")}–${format(end,"HH:mm")} (${dur}min)`}
                     >
-                      <div className="ev-time">{format(start, "h:mma")}<span className="ev-dur"> · {dur}m</span></div>
+                      <div className="ev-time">{format(start, "HH:mm")}<span className="ev-dur"> · {dur}m</span></div>
                       <div className="ev-title">{e.title}</div>
-                      {height > 44 && <div className="ev-end">→ {format(end, "h:mma")}</div>}
+                      {height > 44 && <div className="ev-end">→ {format(end, "HH:mm")}</div>}
                       {e.paid === "paid" && <span className="ev-paid ok" title="Paid in full">✓ Paid</span>}
                       {e.paid === "partial" && <span className="ev-paid part" title={`Outstanding: $${(e.balance||0).toFixed(2)}`}>⚠ $${(e.balance||0).toFixed(0)} due</span>}
                     </div>
@@ -375,7 +375,7 @@ function DayView({ cursor, events, onEventClick, onCreate, editMode, onMove }: a
                 })}
                 {showDrag && (
                   <div className="ev ev-draft" style={{ top: (drag.startMin % 60) * PX_PER_MIN, height: (drag.endMin - drag.startMin) * PX_PER_MIN }}>
-                    <div className="ev-time">{format(addMinutes(setHour(cursor, 7), drag.startMin), "h:mma")}</div>
+                    <div className="ev-time">{format(addMinutes(setHour(cursor, 7), drag.startMin), "HH:mm")}</div>
                     <div>+ New</div>
                   </div>
                 )}
@@ -434,7 +434,7 @@ function SidePanel({ ev, onClose, onOpenPatient }: { ev: CalendarEvent; onClose:
         <button className="sp-close" onClick={onClose}>×</button>
       </div>
       <div className="sp-section">
-        <div className="sp-row"><span>When</span><strong>{format(start, "EEE d MMM, h:mma")} – {format(end, "h:mma")}</strong></div>
+        <div className="sp-row"><span>When</span><strong>{format(start, "EEE d MMM, HH:mm")} – {format(end, "HH:mm")}</strong></div>
         <div className="sp-row"><span>Duration</span><strong>{differenceInMinutes(end, start)} min</strong></div>
         {ev.practitioner && <div className="sp-row"><span>Practitioner</span><strong>{ev.practitioner}</strong></div>}
         {ev.status && <div className="sp-row"><span>Status</span><span className={`badge badge-${ev.status}`}>{ev.status}</span></div>}
@@ -629,7 +629,7 @@ function CreateApptBody({ start, end, patients, onClose, onSaved }: any) {
   const apptEnd = addMinutes(start, Math.max(15, duration));
   return (
     <div>
-      <p className="muted">{format(start, "EEE d MMM, h:mma")} – {format(apptEnd, "h:mma")} ({Math.max(15, duration)} min)</p>
+      <p className="muted">{format(start, "EEE d MMM, HH:mm")} – {format(apptEnd, "HH:mm")} ({Math.max(15, duration)} min)</p>
       <label style={LAB}>Patient</label>
       <input placeholder="🔍 Search patient…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ marginBottom: 8 }} autoFocus />
       {search && filtered.map((p: Patient) => (

@@ -67,7 +67,7 @@ export function Dashboard() {
               const past = t < now;
               return (
                 <div key={a.id} className={`appt-row ${isNext ? "is-next" : ""} ${past ? "past" : ""}`} onClick={(e) => { e.stopPropagation(); nav(`/patients/${a.patient_id}`); }}>
-                  <div className="appt-time">{new Date(a.appointment_date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+                  <div className="appt-time">{new Date(a.appointment_date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</div>
                   <div className="appt-main">
                     <div className="appt-name">{a.first_name} {a.last_name}</div>
                     <div className="appt-type">{a.appointment_type} · {a.duration_minutes}min {a.practitioner ? `· ${a.practitioner}` : ""}</div>
@@ -146,7 +146,7 @@ function NextPatient({ appt, now, onClick }: { appt: Appointment; now: number; o
       <div className="next-left">
         <div className="next-eyebrow">⏰ NEXT PATIENT {soon ? "— SOON" : ""}</div>
         <div className="next-name">{appt.first_name} {appt.last_name}</div>
-        <div className="next-type">{appt.appointment_type} · {new Date(appt.appointment_date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+        <div className="next-type">{appt.appointment_type} · {new Date(appt.appointment_date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</div>
       </div>
       <div className="next-clock">
         <div className="clock-time">{String(h).padStart(2, "0")}:{String(m).padStart(2, "0")}:{String(s).padStart(2, "0")}</div>
