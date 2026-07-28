@@ -44,14 +44,43 @@ fn main() {
         env::set_var("DEV_ADMIN_PASSWORD", "admin");
     }
 
+    // OptiCore has two independent modes, each with its OWN database file so the
+    // demo and the real clinic data never touch each other:
+    //   * LIVE (production): OPTICORE_MODE=live  -> opticore.db, starts empty,
+    //       connects to online booking. This is the real clinic database.
+    //   * DEMO (default):    (unset / demo)      -> opticore-demo.db, sample data.
+    // Because they are separate files, switching between demo and live — or
+    // installing an update — never overwrites or loses the other one's data.
+    let mode = env::var("OPTICORE_MODE").unwrap_or_default().to_lowercase();
+    let is_live = mode == "live" || mode == "production" || mode == "final";
+
     // Store the DB in a writable per-user data dir (Program Files is read-only).
     if env::var("DATABASE_URL").is_err() {
         let dir = data_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let db_path = dir.join("opticore.db");
+        let db_name = if is_live { "opticore.db" } else { "opticore-demo.db" };
+        let db_path = dir.join(db_name);
+
+        // For the LIVE database, only clear seed data on the VERY FIRST creation
+        // (when the file does not yet exist). This gives a clean empty start
+        // without ever wiping real data on subsequent launches.
+        if is_live && !db_path.exists() && env::var("CLEAN_START").is_err() {
+            env::set_var("CLEAN_START", "1");
+        }
+
         // Use forward slashes for the sqlite URL (works on Windows too).
         let url = format!("sqlite://{}?mode=rwc", db_path.display().to_string().replace('\\', "/"));
         env::set_var("DATABASE_URL", url);
+    }
+
+    // Live mode connects to the online booking gateway so website bookings sync in.
+    if is_live {
+        if env::var("WORKER_URL").is_err() {
+            env::set_var("WORKER_URL", "https://opticore-booking.fivelidz.workers.dev");
+        }
+        if env::var("SYNC_SECRET").is_err() {
+            env::set_var("SYNC_SECRET", "opticore-sync-2026");
+        }
     }
 
     // ---- Start the embedded HTTP server in a background thread ----

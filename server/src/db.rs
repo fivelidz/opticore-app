@@ -25,7 +25,16 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
 
     // If CLEAN_START is set, wipe all demo/seed data so the app starts empty.
     // This is used for production builds where you want a blank database.
-    if std::env::var("CLEAN_START").is_ok() {
+    //
+    // SAFETY: this must only EVER run once, on a brand-new database. Otherwise a
+    // production launcher that always sets CLEAN_START would delete real patient
+    // data on every restart. We record a marker row the first time and skip the
+    // wipe forever after, so real data is never touched on subsequent boots.
+    let clean_requested = std::env::var("CLEAN_START").is_ok();
+    let already_cleaned: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM app_meta WHERE key = 'clean_started'")
+        .fetch_one(pool).await.unwrap_or(0) > 0;
+    if clean_requested && !already_cleaned {
         info!("🧹 CLEAN_START: wiping demo data for fresh production start...");
         let tables = [
             "clinical_notes", "allergies", "osdi_scores", "ipl_treatments",
@@ -39,7 +48,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         }
         // reset the auto-increment counters
         sqlx::query("DELETE FROM sqlite_sequence WHERE name IN ('patients','appointments','invoices','invoice_items','payments','clinical_notes','allergies','osdi_scores','ipl_treatments','blocked_times','intake_submissions','messages','website_events','patient_photos')").execute(pool).await?;
+        // Record that this database has been cleaned so we never wipe it again,
+        // even if CLEAN_START stays set on every launch.
+        sqlx::query("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('clean_started', datetime('now'))").execute(pool).await?;
         info!("✓ demo data cleared — app starts empty (only admin user + catalogs remain)");
+    } else if clean_requested && already_cleaned {
+        info!("CLEAN_START ignored — this database was already initialised; real data preserved.");
     }
 
     Ok(())
