@@ -606,6 +606,10 @@ function CreateApptBody({ start, end, patients, onClose, onSaved }: any) {
   // Track whether the user manually overrode the duration; if not, changing the
   // type refreshes the duration to that type's default.
   const [durTouched, setDurTouched] = useState(userDragged);
+  // Editable date + start time. Seeded from where the user clicked/dragged, but
+  // fully typeable so an exact appointment time can be entered directly.
+  const [dateStr, setDateStr] = useState(format(start, "yyyy-MM-dd"));
+  const [startT, setStartT] = useState(format(start, "HH:mm"));
   const filtered = patients.filter((p: Patient) => `${p.first_name} ${p.last_name} ${p.mrn}`.toLowerCase().includes(search.toLowerCase())).slice(0, 8);
   const [saving, setSaving] = useState(false);
 
@@ -614,23 +618,44 @@ function CreateApptBody({ start, end, patients, onClose, onSaved }: any) {
     if (!durTouched) setDuration(TYPE_DURATIONS[t] ?? 30);
   };
 
+  // Effective start Date built from the typed date + time fields (falls back to
+  // the original click if the fields are momentarily blank/invalid).
+  const effStart = (() => {
+    const d = new Date(start);
+    const [y, mo, da] = dateStr.split("-").map(Number);
+    const [hh, mm] = startT.split(":").map(Number);
+    if (y && mo && da) d.setFullYear(y, mo - 1, da);
+    if (!Number.isNaN(hh)) d.setHours(hh, Number.isNaN(mm) ? 0 : mm, 0, 0);
+    return d;
+  })();
+
   const save = async () => {
     if (!pid) return;
     setSaving(true);
     await apptApi.create({
       patient_id: pid,
       appointment_type: type,
-      appointment_date: fmt(start),            // exact dragged/selected start time
+      appointment_date: fmt(effStart),          // exact typed (or dragged) start time
       duration_minutes: Math.max(15, duration), // type default or the length the user chose
     });
     setSaving(false); onSaved();
   };
 
-  const apptEnd = addMinutes(start, Math.max(15, duration));
+  const apptEnd = addMinutes(effStart, Math.max(15, duration));
   return (
     <div>
-      <p className="muted">{format(start, "EEE d MMM, HH:mm")} – {format(apptEnd, "HH:mm")} ({Math.max(15, duration)} min)</p>
-      <label style={LAB}>Patient</label>
+      <p className="muted">{format(effStart, "EEE d MMM, HH:mm")} – {format(apptEnd, "HH:mm")} ({Math.max(15, duration)} min)</p>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 4 }}>
+        <div>
+          <label style={LAB}>Date</label>
+          <input type="date" value={dateStr} onChange={(e) => setDateStr(e.target.value)} />
+        </div>
+        <div>
+          <label style={LAB}>Start time</label>
+          <input type="time" value={startT} step={300} onChange={(e) => setStartT(e.target.value)} />
+        </div>
+      </div>
+      <label style={{ ...LAB, marginTop: 12 }}>Patient</label>
       <input placeholder="🔍 Search patient…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ marginBottom: 8 }} autoFocus />
       {search && filtered.map((p: Patient) => (
         <div key={p.id} className={`pat-pick ${pid === p.id ? "sel" : ""}`} onClick={() => { setPid(p.id); setSearch(`${p.first_name} ${p.last_name}`); }}>
