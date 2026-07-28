@@ -71,19 +71,32 @@ export function CalendarPage() {
 
   // ---- event move (true drag) ----
   const moveEvent = async (ev: CalendarEvent, newStart: Date) => {
+    // Preserve the ORIGINAL duration of the event when moving it.
     const dur = differenceInMinutes(parseISO(ev.end_at.replace(" ", "T")), parseISO(ev.start_at.replace(" ", "T")));
     const newEnd = addMinutes(newStart, dur);
-    if (ev.kind === "appointment") {
-      await apptApi.update(ev.id, {
-        appointment_type: ev.title, appointment_date: fmt(newStart), duration_minutes: dur,
-        practitioner: ev.practitioner || undefined, status: ev.status || "scheduled",
-      });
-    } else {
-      // atomic update — no delete+create data-loss risk
-      await blockedTimes.update(ev.id, { start_at: fmt(newStart), end_at: fmt(newEnd), reason: ev.title, practitioner: ev.practitioner || undefined });
+    // Skip no-op moves (dropped back on the same start time).
+    if (isSameDay(parseISO(ev.start_at.replace(" ", "T")), newStart) &&
+        differenceInMinutes(newStart, parseISO(ev.start_at.replace(" ", "T"))) === 0) {
+      setSelected(null); return;
     }
-    setSelected(null);
-    load();
+    try {
+      if (ev.kind === "appointment") {
+        await apptApi.update(ev.id, {
+          appointment_type: ev.title,
+          appointment_date: fmt(newStart),
+          duration_minutes: dur,
+          practitioner: ev.practitioner || undefined,
+          status: ev.status || "scheduled",
+          notes: ev.reason ?? undefined,
+        });
+      } else {
+        // atomic update — no delete+create data-loss risk
+        await blockedTimes.update(ev.id, { start_at: fmt(newStart), end_at: fmt(newEnd), reason: ev.title, practitioner: ev.practitioner || undefined });
+      }
+    } finally {
+      setSelected(null);
+      load(); // reload so the event renders in its new position (confirms the change)
+    }
   };
 
   return (
@@ -182,22 +195,26 @@ function WeekView({ cursor, evByDay, onEventClick, onCreate, editMode, onMove }:
   const [hoverDay, setHoverDay] = useState<number | null>(null);
   const [hoverMin, setHoverMin] = useState<number | null>(null);
 
-  const minFromY = (y: number) => Math.max(0, Math.min(720, Math.round(y / PX_PER_MIN / 15) * 15));
+  // Minutes-within-a-single-hour-cell (0–60). Each cell is one hour tall (60min * PX_PER_MIN).
+  const minInCell = (y: number) => Math.max(0, Math.min(60, Math.round(y / PX_PER_MIN / 15) * 15));
+  // Convert a cell's hour + in-cell offset into absolute minutes from 7am (grid origin), clamped 0..720.
+  const absMin = (hour: number, y: number) => Math.max(0, Math.min(720, (hour - 7) * 60 + minInCell(y)));
 
-  const onDownCell = (dayIdx: number, e: React.MouseEvent) => {
+  const onDownCell = (dayIdx: number, hour: number, e: React.MouseEvent) => {
     if (!editMode) return;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setDrag({ dayIdx, startMin: minFromY(e.clientY - rect.top), endMin: minFromY(e.clientY - rect.top) + 30 });
+    const startMin = absMin(hour, e.clientY - rect.top);
+    setDrag({ dayIdx, startMin, endMin: startMin + 30 });
   };
-  const onMoveCell = (dayIdx: number, e: React.MouseEvent) => {
+  const onMoveCell = (dayIdx: number, hour: number, e: React.MouseEvent) => {
     if (drag && drag.dayIdx === dayIdx) {
       const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      setDrag({ ...drag, endMin: Math.max(drag.startMin + 15, minFromY(e.clientY - rect.top)) });
+      setDrag({ ...drag, endMin: Math.max(drag.startMin + 15, absMin(hour, e.clientY - rect.top)) });
     }
     if (moving) {
       const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
       setHoverDay(dayIdx);
-      setHoverMin(minFromY(e.clientY - rect.top));
+      setHoverMin(absMin(hour, e.clientY - rect.top));
     }
   };
   const onUpCell = () => {
@@ -220,7 +237,8 @@ function WeekView({ cursor, evByDay, onEventClick, onCreate, editMode, onMove }:
     if (!editMode) return;
     e.stopPropagation();
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const offsetMin = minFromY(e.clientY - rect.top);
+    // offset within the event where the user grabbed it (0..duration minutes)
+    const offsetMin = minInCell(e.clientY - rect.top);
     setMoving({ ev, offsetMin });
   };
 
@@ -256,8 +274,8 @@ function WeekRow({ hour, days, evByDay, onDown, onMove, onUp, drag, onEventClick
         const showHover = moving && hoverDay === dayIdx && hoverMin !== null && hoverMin >= (hour - 7) * 60 && hoverMin < (hour - 6) * 60;
         return (
           <div key={dayIdx} className="week-cell"
-            onMouseDown={(e) => onDown(dayIdx, e)}
-            onMouseMove={(e) => onMove(dayIdx, e)}
+            onMouseDown={(e) => onDown(dayIdx, hour, e)}
+            onMouseMove={(e) => onMove(dayIdx, hour, e)}
             onMouseUp={onUp}
           >
             {evs.map((e: CalendarEvent) => {
@@ -307,7 +325,10 @@ function DayView({ cursor, events, onEventClick, onCreate, editMode, onMove }: a
   const [moving, setMoving] = useState<{ ev: CalendarEvent; offsetMin: number } | null>(null);
   const [hoverMin, setHoverMin] = useState<number | null>(null);
 
-  const minFromY = (y: number) => Math.max(0, Math.min(720, Math.round(y / PX_PER_MIN / 15) * 15));
+  // Minutes-within-a-single-hour-cell (0–60).
+  const minInCell = (y: number) => Math.max(0, Math.min(60, Math.round(y / PX_PER_MIN / 15) * 15));
+  // Absolute minutes from 7am (grid origin) for a given cell hour, clamped 0..720.
+  const absMin = (hour: number, y: number) => Math.max(0, Math.min(720, (hour - 7) * 60 + minInCell(y)));
 
   return (
     <div className="day-view">
@@ -321,10 +342,10 @@ function DayView({ cursor, events, onEventClick, onCreate, editMode, onMove }: a
             <div key={h} className="day-row">
               <div className="day-time">{format(new Date().setHours(h, 0), "h a")}</div>
               <div className="day-cell"
-                onMouseDown={(e) => { if (editMode) setDrag({ startMin: minFromY(e.clientY - e.currentTarget.getBoundingClientRect().top), endMin: 30 }); }}
+                onMouseDown={(e) => { if (editMode) { const s = absMin(h, e.clientY - e.currentTarget.getBoundingClientRect().top); setDrag({ startMin: s, endMin: s + 30 }); } }}
                 onMouseMove={(e) => {
-                  if (drag) setDrag({ ...drag, endMin: Math.max(drag.startMin + 15, minFromY(e.clientY - e.currentTarget.getBoundingClientRect().top)) });
-                  if (moving) setHoverMin(minFromY(e.clientY - e.currentTarget.getBoundingClientRect().top));
+                  if (drag) setDrag({ ...drag, endMin: Math.max(drag.startMin + 15, absMin(h, e.clientY - e.currentTarget.getBoundingClientRect().top)) });
+                  if (moving) setHoverMin(absMin(h, e.clientY - e.currentTarget.getBoundingClientRect().top));
                 }}
                 onMouseUp={() => {
                   if (drag) onCreate(addMinutes(setHour(cursor, 7), drag.startMin), addMinutes(setHour(cursor, 7), drag.endMin));
@@ -340,7 +361,7 @@ function DayView({ cursor, events, onEventClick, onCreate, editMode, onMove }: a
                   return (
                     <div key={e.id} className={`ev ev-${e.kind} ${e.status || ""} ${e.paid ? "paid-" + e.paid : ""} ${editMode ? "draggable" : ""}`}
                       style={{ top: start.getMinutes() * PX_PER_MIN, height }}
-                      onMouseDown={(ev) => { if (editMode) { ev.stopPropagation(); const r = ev.currentTarget.getBoundingClientRect(); setMoving({ ev: e, offsetMin: minFromY(ev.clientY - r.top) }); } }}
+                      onMouseDown={(ev) => { if (editMode) { ev.stopPropagation(); const r = ev.currentTarget.getBoundingClientRect(); setMoving({ ev: e, offsetMin: minInCell(ev.clientY - r.top) }); } }}
                       onClick={(ev) => { if (!editMode) { ev.stopPropagation(); onEventClick(e); } }}
                       title={`${e.title} — ${format(start,"h:mma")}–${format(end,"h:mma")} (${dur}min)`}
                     >
@@ -563,21 +584,52 @@ function BlockBody({ start, end, onClose, onSaved }: any) {
   );
 }
 
+// Default duration (minutes) per appointment type.
+const TYPE_DURATIONS: Record<string, number> = {
+  "Dry Eye Consultation": 60,
+  "Follow-up": 30,
+  "IPL Treatment": 45,
+  "Imaging": 30,
+  "Telehealth": 20,
+};
+
 function CreateApptBody({ start, end, patients, onClose, onSaved }: any) {
   const [pid, setPid] = useState<number | "">("");
   const [type, setType] = useState("Dry Eye Consultation");
   const [search, setSearch] = useState("");
+  // The user's dragged length (rounded to a 15-min slot). If they only clicked
+  // (default 30-min stub created on mouse-down) treat the type default as the source of truth.
+  const draggedMin = Math.max(15, differenceInMinutes(end, start));
+  const userDragged = draggedMin > 30; // > the default single-click stub → an intentional drag
+  // Duration state: seeded from the drag if intentional, else the type default.
+  const [duration, setDuration] = useState<number>(userDragged ? draggedMin : (TYPE_DURATIONS[type] ?? 30));
+  // Track whether the user manually overrode the duration; if not, changing the
+  // type refreshes the duration to that type's default.
+  const [durTouched, setDurTouched] = useState(userDragged);
   const filtered = patients.filter((p: Patient) => `${p.first_name} ${p.last_name} ${p.mrn}`.toLowerCase().includes(search.toLowerCase())).slice(0, 8);
   const [saving, setSaving] = useState(false);
+
+  const onTypeChange = (t: string) => {
+    setType(t);
+    if (!durTouched) setDuration(TYPE_DURATIONS[t] ?? 30);
+  };
+
   const save = async () => {
     if (!pid) return;
     setSaving(true);
-    await apptApi.create({ patient_id: pid, appointment_type: type, appointment_date: fmt(start), duration_minutes: Math.max(15, differenceInMinutes(end, start)) });
+    await apptApi.create({
+      patient_id: pid,
+      appointment_type: type,
+      appointment_date: fmt(start),            // exact dragged/selected start time
+      duration_minutes: Math.max(15, duration), // type default or the length the user chose
+    });
     setSaving(false); onSaved();
   };
+
+  const apptEnd = addMinutes(start, Math.max(15, duration));
   return (
     <div>
-      <p className="muted">{format(start, "EEE d MMM, h:mma")} – {format(end, "h:mma")}</p>
+      <p className="muted">{format(start, "EEE d MMM, h:mma")} – {format(apptEnd, "h:mma")} ({Math.max(15, duration)} min)</p>
       <label style={LAB}>Patient</label>
       <input placeholder="🔍 Search patient…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ marginBottom: 8 }} autoFocus />
       {search && filtered.map((p: Patient) => (
@@ -585,11 +637,21 @@ function CreateApptBody({ start, end, patients, onClose, onSaved }: any) {
           {p.first_name} {p.last_name} <span className="mono">{p.mrn}</span>
         </div>
       ))}
-      <label style={{ ...LAB, marginTop: 12 }}>Type</label>
-      <select value={type} onChange={(e) => setType(e.target.value)}>
-        <option>Dry Eye Consultation</option><option>Follow-up</option><option>IPL Treatment</option>
-        <option>Imaging</option><option>Telehealth</option>
-      </select>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div>
+          <label style={{ ...LAB, marginTop: 12 }}>Type</label>
+          <select value={type} onChange={(e) => onTypeChange(e.target.value)}>
+            <option>Dry Eye Consultation</option><option>Follow-up</option><option>IPL Treatment</option>
+            <option>Imaging</option><option>Telehealth</option>
+          </select>
+        </div>
+        <div>
+          <label style={{ ...LAB, marginTop: 12 }}>Duration</label>
+          <select value={Math.max(15, duration)} onChange={(e) => { setDuration(+e.target.value); setDurTouched(true); }}>
+            {[15, 20, 30, 45, 60, 90, 120].map((m) => <option key={m} value={m}>{m} min</option>)}
+          </select>
+        </div>
+      </div>
       <div className="modal-actions">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
         <button className="btn-primary" onClick={save} disabled={saving || !pid}>{saving ? "Saving…" : "Book"}</button>

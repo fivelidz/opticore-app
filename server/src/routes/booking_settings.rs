@@ -229,6 +229,31 @@ pub async fn approve_intake(
         .ok_or(ApiError::NotFound)?;
     let info = row_to_intake_info(&row);
 
+    // --- near-match / possible-duplicate detection (advisory) ---
+    // Before creating a patient, surface existing patients with SIMILAR but not
+    // identical details so staff are warned about a possible duplicate. This is
+    // ADVISORY: approval still proceeds (creating a new patient). To merge
+    // instead, staff use the /match-check + /merge-into flow.
+    let exact_id = crate::routes::intake::exact_match_patient(
+        &state,
+        &info.first_name,
+        &info.last_name,
+        info.date_of_birth.as_deref(),
+        info.phone.as_deref(),
+        info.email.as_deref(),
+    )
+    .await?;
+    let near_matches = crate::routes::intake::near_match_patients(
+        &state,
+        exact_id,
+        &info.first_name,
+        &info.last_name,
+        info.date_of_birth.as_deref(),
+        info.phone.as_deref(),
+        info.email.as_deref(),
+    )
+    .await?;
+
     // --- create patient (inlined from intake::import_one) ---
     let year = chrono::Utc::now().format("%Y");
     let mrn = format!("MOS-{}{:07}", year, rand::random::<u32>() % 1_000_000);
@@ -298,6 +323,10 @@ pub async fn approve_intake(
         "mrn": mrn,
         "appointment_id": appointment_id,
         "notification_queued": queued,
+        // advisory: possible duplicates detected at approval time. A non-empty
+        // list means staff may have wanted to merge instead of create-new.
+        "exact_match_existed": exact_id.is_some(),
+        "possible_matches": near_matches,
     })))
 }
 

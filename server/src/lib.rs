@@ -110,6 +110,8 @@ pub async fn run() -> Result<()> {
         .route("/api/intake/:id/import", post(routes::intake::import))
         .route("/api/intake/:id/archive", post(routes::intake::archive))
         .route("/api/intake/auto-import", post(routes::intake::auto_import))
+        .route("/api/intake/:id/match-check", post(routes::intake::match_check))
+        .route("/api/intake/:id/merge-into/:patient_id", post(routes::intake::merge_into))
         .route("/api/messages", get(routes::messages::list).post(routes::messages::receive))
         .route("/api/messages/:id/read", post(routes::messages::mark_read))
         .route("/api/messages/:id/archive", post(routes::messages::archive))
@@ -152,7 +154,8 @@ async fn health(axum::extract::State(_s): axum::extract::State<AppState>) -> axu
     axum::Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "clinic": "OptiCore"
+        "clinic": "OptiCore",
+        "mode": if std::env::var("CLEAN_START").is_ok() { "production" } else { "demo" }
     }))
 }
 

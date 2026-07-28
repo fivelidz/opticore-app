@@ -1,9 +1,80 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type TextareaHTMLAttributes } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   patientDetail, clinical, billing, appointments as apptApi, patients as patApi, photos as photoApi,
   type PatientDetail as PDetail, type PatientPhoto,
 } from "../api";
+
+// ---------- Auto-expanding textarea ----------
+// Grows in height as text is added: sets height=auto then height=scrollHeight.
+function autoGrow(el: HTMLTextAreaElement | null) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
+}
+
+function AutoTextarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  // resize on mount and whenever the value changes (controlled inputs)
+  useEffect(() => { autoGrow(ref.current); }, [props.value]);
+  return (
+    <textarea
+      {...props}
+      ref={ref}
+      onInput={(e) => { autoGrow(e.currentTarget); props.onInput?.(e); }}
+    />
+  );
+}
+
+// ---------- Collapsible section wrapper ----------
+function CollapsibleSection({
+  id, title, extra, collapsed, onToggle, children,
+}: {
+  id: string;
+  title: React.ReactNode;
+  extra?: React.ReactNode;
+  collapsed: boolean;
+  onToggle: (id: string) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="card">
+      <h3 className="card-h collapsible" onClick={() => onToggle(id)}>
+        <span className="collapse-chev">{collapsed ? "▸" : "▾"}</span>
+        <span className="collapse-title">{title}</span>
+        {extra && <span className="collapse-extra" onClick={(e) => e.stopPropagation()}>{extra}</span>}
+      </h3>
+      {!collapsed && <div className="collapse-body">{children}</div>}
+    </section>
+  );
+}
+
+// ---------- CSV export helpers ----------
+function csvCell(v: unknown): string {
+  const s = v == null ? "" : String(v);
+  // escape if the value contains a comma, quote, or newline
+  if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+function toCsv(headers: string[], rows: unknown[][]): string {
+  const lines = [headers.map(csvCell).join(",")];
+  for (const row of rows) lines.push(row.map(csvCell).join(","));
+  return lines.join("\r\n");
+}
+
+function downloadCsv(filename: string, csv: string) {
+  // prepend BOM so Excel opens UTF-8 correctly
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 export function PatientDetailPage() {
   const { id } = useParams();
@@ -14,6 +85,17 @@ export function PatientDetailPage() {
   const [loadErr, setLoadErr] = useState("");
   const [showOsdi, setShowOsdi] = useState(false);
   const [showIpl, setShowIpl] = useState(false);
+  // Collapse state: a Set of section ids that are currently collapsed.
+  // Default: the longer sections start collapsed to keep the page compact.
+  const [collapsed, setCollapsed] = useState<Set<string>>(
+    () => new Set(["photos", "invoices"]),
+  );
+  const toggle = (sid: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      next.has(sid) ? next.delete(sid) : next.add(sid);
+      return next;
+    });
 
   const load = () => {
     setLoading(true); setLoadErr("");
@@ -57,9 +139,9 @@ export function PatientDetailPage() {
       <div className="pd-scroll">
         {/* Contact + allergies side by side */}
         <div className="pd-row-2">
-          <ContactCard patient={p} age={age} firstVisit={data.stats.first_visit} pid={pid} onChanged={load} />
-          <section className="card">
-            <h3 className="card-h">Allergies {data.allergies.length > 0 && <span className="count-warn">⚠️</span>}</h3>
+          <ContactCard patient={p} age={age} firstVisit={data.stats.first_visit} pid={pid} onChanged={load} collapsed={collapsed.has("contact")} onToggle={toggle} />
+          <CollapsibleSection id="allergies" collapsed={collapsed.has("allergies")} onToggle={toggle}
+            title={<>Allergies {data.allergies.length > 0 && <span className="count-warn">⚠️</span>}</>}>
             {data.allergies.length === 0 ? <div className="empty-sm">✓ No known allergies</div> :
               data.allergies.map((a) => (
                 <div key={a.id} className="allergy-row">
@@ -69,13 +151,14 @@ export function PatientDetailPage() {
                 </div>
               ))}
             <AddAllergy pid={pid} onAdded={load} />
-          </section>
+          </CollapsibleSection>
         </div>
 
         {/* OSDI + IPL */}
         <div className="pd-row-2">
-          <section className="card">
-            <h3 className="card-h">OSDI Scores (dry eye) <button className="mini add-btn" onClick={() => setShowOsdi(true)}>+ Add</button></h3>
+          <CollapsibleSection id="osdi" collapsed={collapsed.has("osdi")} onToggle={toggle}
+            title="OSDI Scores (dry eye)"
+            extra={<button className="mini add-btn" onClick={() => setShowOsdi(true)}>+ Add</button>}>
             {data.osdi_scores.length === 0 ? <div className="empty-sm">No OSDI recorded</div> :
               data.osdi_scores.map((o) => (
                 <div key={o.id} className="osdi-row">
@@ -87,9 +170,10 @@ export function PatientDetailPage() {
                   <div className="osdi-d">{new Date(o.score_date).toLocaleDateString()}</div>
                 </div>
               ))}
-          </section>
-          <section className="card">
-            <h3 className="card-h">IPL Treatments <button className="mini add-btn" onClick={() => setShowIpl(true)}>+ Add</button></h3>
+          </CollapsibleSection>
+          <CollapsibleSection id="ipl" collapsed={collapsed.has("ipl")} onToggle={toggle}
+            title="IPL Treatments"
+            extra={<button className="mini add-btn" onClick={() => setShowIpl(true)}>+ Add</button>}>
             {data.ipl_treatments.length === 0 ? <div className="empty-sm">No IPL treatments</div> :
               data.ipl_treatments.map((t) => (
                 <div key={t.id} className="ipl-row">
@@ -101,29 +185,32 @@ export function PatientDetailPage() {
                   </div>
                 </div>
               ))}
-          </section>
+          </CollapsibleSection>
         </div>
 
         {/* Appointments */}
-        <section className="card">
-          <h3 className="card-h">Appointment History ({data.appointments.length})</h3>
+        <CollapsibleSection id="appts" collapsed={collapsed.has("appts")} onToggle={toggle}
+          title={`Appointment History (${data.appointments.length})`}
+          extra={data.appointments.length > 0 && (
+            <button className="mini" onClick={() => exportAppointmentNotes(p, data.appointments)}>⬇ Export appointment notes (CSV)</button>
+          )}>
           {data.appointments.length === 0 ? <div className="empty-sm">No appointments</div> :
             <div className="appt-history">
               {data.appointments.map((a) => (
                 <AppointmentRow key={a.id} appt={a} onChanged={load} />
               ))}
             </div>}
-        </section>
+        </CollapsibleSection>
 
         {/* Photos & documents */}
-        <PhotosSection pid={pid} onChanged={load} />
+        <PhotosSection pid={pid} onChanged={load} collapsed={collapsed.has("photos")} onToggle={toggle} />
 
         {/* Clinical notes */}
-        <NotesSection pid={pid} notes={data.notes} onChanged={load} />
+        <NotesSection pid={pid} patient={p} notes={data.notes} onChanged={load} collapsed={collapsed.has("notes")} onToggle={toggle} />
 
         {/* Billing */}
-        <section className="card">
-          <h3 className="card-h">Invoices & Payments ({data.invoices.length})</h3>
+        <CollapsibleSection id="invoices" collapsed={collapsed.has("invoices")} onToggle={toggle}
+          title={`Invoices & Payments (${data.invoices.length})`}>
           {data.invoices.length === 0 ? <div className="empty-sm">No invoices</div> :
             <table className="dt">
               <thead><tr><th>Invoice</th><th>Date</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead>
@@ -140,7 +227,7 @@ export function PatientDetailPage() {
                 ))}
               </tbody>
             </table>}
-        </section>
+        </CollapsibleSection>
       </div>
       {showOsdi && <AddOsdiModal pid={pid} onClose={() => setShowOsdi(false)} onSaved={() => { setShowOsdi(false); load(); }} />}
       {showIpl && <AddIplModal pid={pid} onClose={() => setShowIpl(false)} onSaved={() => { setShowIpl(false); load(); }} />}
@@ -149,7 +236,7 @@ export function PatientDetailPage() {
   );
 }
 
-function PhotosSection({ pid, onChanged }: { pid: number; onChanged: () => void }) {
+function PhotosSection({ pid, onChanged, collapsed, onToggle }: { pid: number; onChanged: () => void; collapsed: boolean; onToggle: (id: string) => void }) {
   const [photos, setPhotos] = useState<PatientPhoto[]>([]);
   const [tab, setTab] = useState<"profile" | "medical" | "document">("medical");
   const [dataCache, setDataCache] = useState<Record<number, string>>({});
@@ -185,8 +272,8 @@ function PhotosSection({ pid, onChanged }: { pid: number; onChanged: () => void 
   ];
 
   return (
-    <section className="card">
-      <h3 className="card-h">Photos & Documents ({photos.length})</h3>
+    <CollapsibleSection id="photos" collapsed={collapsed} onToggle={onToggle}
+      title={`Photos & Documents (${photos.length})`}>
       <div className="photo-tabs">
         {tabs.map(([t, label, icon]) => (
           <button key={t} className={tab === t ? "photo-tab on" : "photo-tab"} onClick={() => setTab(t)}>
@@ -228,7 +315,7 @@ function PhotosSection({ pid, onChanged }: { pid: number; onChanged: () => void 
         .photo-date { padding: 0 8px 6px; font-size: 10px; color: var(--text-dim); }
         .empty-sm { padding: 12px; text-align: center; color: var(--text-dim); font-size: 13px; grid-column: 1/-1; }
       `}</style>
-    </section>
+    </CollapsibleSection>
   );
 }
 
@@ -316,7 +403,7 @@ function AppointmentRow({ appt, onChanged }: { appt: PDetail["appointments"][0];
             <div className="appt-h-notes-label">📝 Appointment Notes</div>
             {editNotes ? (
               <>
-                <textarea className="appt-h-edit" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Pre-visit reason, post-visit findings, instructions…" />
+                <AutoTextarea className="appt-h-edit" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Pre-visit reason, post-visit findings, instructions…" />
                 <div className="appt-h-edit-actions">
                   <button className="mini" onClick={() => { setEditNotes(false); setNotes(appt.notes || ""); }}>Cancel</button>
                   <button className="btn-primary mini" onClick={saveNotes} disabled={saving}>{saving ? "Saving…" : "Save Notes"}</button>
@@ -339,7 +426,7 @@ function AppointmentRow({ appt, onChanged }: { appt: PDetail["appointments"][0];
   );
 }
 
-function NotesSection({ pid, notes, onChanged }: { pid: number; notes: PDetail["notes"]; onChanged: () => void }) {
+function NotesSection({ pid, patient, notes, onChanged, collapsed, onToggle }: { pid: number; patient: PDetail["patient"]; notes: PDetail["notes"]; onChanged: () => void; collapsed: boolean; onToggle: (id: string) => void }) {
   const [note, setNote] = useState("");
   const [cat, setCat] = useState("general");
   const [saving, setSaving] = useState(false);
@@ -352,15 +439,19 @@ function NotesSection({ pid, notes, onChanged }: { pid: number; notes: PDetail["
     setNote(""); setSaving(false); onChanged();
   };
   return (
-    <section className="card">
-      <h3 className="card-h">Clinical Notes ({notes.length})</h3>
+    <CollapsibleSection id="notes" collapsed={collapsed} onToggle={onToggle}
+      title={`Clinical Notes (${notes.length})`}
+      extra={notes.length > 0 && (
+        <button className="mini" onClick={() => exportClinicalNotes(patient, notes)}>⬇ Export all clinical notes (CSV)</button>
+      )}>
       <div className="note-add-row">
         <select value={cat} onChange={(e) => setCat(e.target.value)} style={{ width: "auto" }}>
           <option value="general">General</option><option value="assessment">Assessment</option>
           <option value="treatment">Treatment</option><option value="followup">Follow-up</option>
         </select>
-        <input placeholder="Add a clinical note…" value={note} onChange={(e) => setNote(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && add()} />
+        <AutoTextarea className="note-add-input" rows={1} placeholder="Add a clinical note…" value={note}
+          onChange={(e) => setNote(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); add(); } }} />
         <button className="btn-primary" onClick={add} disabled={saving || !note.trim()}>{saving ? "…" : "Add"}</button>
       </div>
       <div className="note-list">
@@ -384,8 +475,32 @@ function NotesSection({ pid, notes, onChanged }: { pid: number; notes: PDetail["
         ))}
         {notes.length === 0 && <div className="empty-sm">No notes yet</div>}
       </div>
-    </section>
+    </CollapsibleSection>
   );
+}
+
+// ---------- CSV export builders ----------
+function exportClinicalNotes(patient: PDetail["patient"], notes: PDetail["notes"]) {
+  const rows = notes.map((n) => [
+    new Date(n.created_at).toLocaleString(),
+    n.category,
+    n.author || "",
+    n.note,
+  ]);
+  const csv = toCsv(["Date", "Category", "Author", "Note"], rows);
+  downloadCsv(`clinical-notes_${patient.mrn || patient.id}.csv`, csv);
+}
+
+function exportAppointmentNotes(patient: PDetail["patient"], appts: PDetail["appointments"]) {
+  const rows = appts.map((a) => [
+    new Date(a.appointment_date).toLocaleString(),
+    a.appointment_type,
+    a.practitioner || "",
+    a.status,
+    a.notes || "",
+  ]);
+  const csv = toCsv(["Appointment Date", "Type", "Practitioner", "Status", "Notes"], rows);
+  downloadCsv(`appointment-notes_${patient.mrn || patient.id}.csv`, csv);
 }
 
 function AddAllergy({ pid, onAdded }: { pid: number; onAdded: () => void }) {
@@ -413,7 +528,7 @@ function Row({ label, v }: { label: string; v?: string | null }) {
 function osdiLabel(s: number) { return s <= 12 ? "Normal" : s <= 22 ? "Mild" : s <= 32 ? "Moderate" : s <= 45 ? "Severe" : "Very Severe"; }
 function osdiColor(s: number) { return s <= 12 ? "var(--green)" : s <= 22 ? "var(--accent)" : s <= 32 ? "var(--amber)" : "var(--red)"; }
 
-function ContactCard({ patient, age, firstVisit, pid, onChanged }: any) {
+function ContactCard({ patient, age, firstVisit, pid, onChanged, collapsed, onToggle }: any) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ ...patient });
   const [saving, setSaving] = useState(false);
@@ -427,8 +542,9 @@ function ContactCard({ patient, age, firstVisit, pid, onChanged }: any) {
     } finally { setSaving(false); }
   };
   return (
-    <section className="card">
-      <h3 className="card-h">Contact & Demographics {!editing && <button className="mini add-btn" onClick={() => { setForm({ ...patient }); setEditing(true); }}>✎ Edit</button>}</h3>
+    <CollapsibleSection id="contact" collapsed={collapsed} onToggle={onToggle}
+      title="Contact & Demographics"
+      extra={!editing && <button className="mini add-btn" onClick={() => { setForm({ ...patient }); setEditing(true); }}>✎ Edit</button>}>
       {!editing ? (
         <>
           <Row label="Phone" v={patient.phone} />
@@ -453,7 +569,7 @@ function ContactCard({ patient, age, firstVisit, pid, onChanged }: any) {
           </div>
         </div>
       )}
-    </section>
+    </CollapsibleSection>
   );
 }
 
@@ -593,7 +709,15 @@ const PD_STYLE = `
 .mini { background: var(--bg-elev-2); color: var(--text); border: 1px solid var(--border); padding: 4px 10px; border-radius: 6px; font-size: 12px; }
 .mini.danger { color: var(--red); }
 .out { color: var(--red); font-weight: 600; }
-.note-add-row { display: flex; gap: 8px; margin-bottom: 14px; }
+.note-add-row { display: flex; gap: 8px; margin-bottom: 14px; align-items: flex-start; }
+.note-add-input { flex: 1; font-family: inherit; font-size: 14px; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--text); resize: none; overflow: hidden; line-height: 1.4; min-height: 38px; }
+/* Collapsible section headers */
+.card-h.collapsible { cursor: pointer; user-select: none; }
+.card-h.collapsible:hover .collapse-title { color: var(--text); }
+.collapse-chev { color: var(--text-dim); font-size: 12px; width: 12px; flex-shrink: 0; transition: color 0.15s; }
+.card-h.collapsible:hover .collapse-chev { color: var(--accent); }
+.collapse-title { display: inline-flex; align-items: center; gap: 6px; }
+.collapse-extra { margin-left: auto; display: inline-flex; gap: 6px; }
 .note-item { padding: 12px 0; border-bottom: 1px solid var(--border); }
 .note-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 .note-author { font-weight: 600; font-size: 13px; }

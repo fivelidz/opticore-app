@@ -1,13 +1,14 @@
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useTheme } from "./theme";
 import { useEffect, useState } from "react";
-import { auth, type User } from "./api";
+import { auth, api, type User } from "./api";
 
 export function App() {
   const { theme, toggle } = useTheme();
   const nav = useNavigate();
   const loc = useLocation();
   const [user, setUser] = useState<User | null>(null);
+  const [build, setBuild] = useState<{ version?: string; mode?: string } | null>(null);
 
   useEffect(() => {
     const raw = localStorage.getItem("pms_user");
@@ -15,6 +16,9 @@ export function App() {
       try { setUser(JSON.parse(raw)); } catch { localStorage.removeItem("pms_user"); }
     }
     auth.me().then((r) => setUser(r.data)).catch(() => {});
+    api.get("/health")
+      .then((r) => setBuild({ version: r.data?.version, mode: r.data?.mode }))
+      .catch(() => {});
   }, []);
 
   const logout = () => {
@@ -33,6 +37,20 @@ export function App() {
     </button>
   );
 
+  // react-router maintains a history index in window.history.state.idx.
+  // Use it to know whether there's anywhere to go back/forward to.
+  const [histIdx, setHistIdx] = useState<number>(
+    () => (window.history.state && typeof window.history.state.idx === "number" ? window.history.state.idx : 0)
+  );
+  useEffect(() => {
+    const idx = window.history.state && typeof window.history.state.idx === "number" ? window.history.state.idx : 0;
+    setHistIdx(idx);
+  }, [loc.key]);
+
+  const isDashboard = loc.pathname === "/";
+  const canGoBack = histIdx > 0;
+  const canGoForward = typeof window.history.length === "number" && histIdx < window.history.length - 1;
+
   return (
     <div className="layout">
       <aside className="sidebar">
@@ -41,6 +59,16 @@ export function App() {
           <div>
             <div className="brand-title">OptiCore</div>
             <div className="brand-sub">Practice Management</div>
+            {build && (
+              <div className="build-badges">
+                {build.version && <span className="badge badge-version">v{build.version}</span>}
+                {build.mode && (
+                  <span className={"badge " + (build.mode === "production" ? "badge-prod" : "badge-demo")}>
+                    {build.mode === "production" ? "LIVE" : "DEMO"}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -76,6 +104,29 @@ export function App() {
       </aside>
 
       <main className="content">
+        {!isDashboard && (
+          <div className="content-header">
+            <button
+              className="nav-back-btn"
+              onClick={() => nav(-1)}
+              disabled={!canGoBack}
+              title="Go back"
+              aria-label="Go back"
+            >
+              <span className="nav-back-arrow">←</span>
+              <span>Back</span>
+            </button>
+            <button
+              className="nav-fwd-btn"
+              onClick={() => nav(1)}
+              disabled={!canGoForward}
+              title="Go forward"
+              aria-label="Go forward"
+            >
+              <span className="nav-back-arrow">→</span>
+            </button>
+          </div>
+        )}
         <Outlet />
       </main>
 
@@ -92,6 +143,11 @@ export function App() {
         .brand-mark { font-size: 28px; }
         .brand-title { font-weight: 700; font-size: 16px; }
         .brand-sub { font-size: 12px; color: var(--text-dim); }
+        .build-badges { display: flex; gap: 4px; margin-top: 4px; }
+        .badge { font-size: 9px; font-weight: 700; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 999px; line-height: 1.5; }
+        .badge-version { background: var(--surface-2, rgba(127,127,127,0.15)); color: var(--text-dim); }
+        .badge-prod { background: rgba(34,197,94,0.18); color: #16a34a; }
+        .badge-demo { background: rgba(234,179,8,0.18); color: #b45309; }
         .nav { display: flex; flex-direction: column; gap: 4px; flex: 1; }
         .nav-item {
           display: flex; align-items: center; gap: 12px;
@@ -115,6 +171,22 @@ export function App() {
         .user-role { font-size: 11px; color: var(--text-dim); text-transform: capitalize; }
         .logout-btn { width: 100%; }
         .content { flex: 1; overflow-y: auto; padding: 32px 40px; }
+        .content-header { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; }
+        .nav-back-btn, .nav-fwd-btn {
+          display: inline-flex; align-items: center; gap: 6px;
+          background: var(--bg-elev); color: var(--text-dim);
+          border: 1px solid var(--border); border-radius: 8px;
+          padding: 6px 12px; font-size: 13px; font-weight: 500;
+          cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s;
+        }
+        .nav-fwd-btn { padding: 6px 10px; }
+        .nav-back-btn:hover:not(:disabled), .nav-fwd-btn:hover:not(:disabled) {
+          background: var(--bg-elev-2); color: var(--text); border-color: var(--accent);
+        }
+        .nav-back-btn:disabled, .nav-fwd-btn:disabled {
+          opacity: 0.4; cursor: not-allowed;
+        }
+        .nav-back-arrow { font-size: 15px; line-height: 1; }
       `}</style>
     </div>
   );

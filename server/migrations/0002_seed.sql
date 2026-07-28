@@ -15,7 +15,15 @@ VALUES
 (2, 'IPL Treatment',        datetime('now','+1 day','start of day','+11 hours'), 45, 'Dr. Chapman-Davies', 'confirmed', 'Session 2 of 4'),
 (3, 'Follow-up',            datetime('now','+2 days','start of day','+10 hours'),30, 'Regina Chapman-Davies', 'scheduled', '6-week review'),
 (1, 'Imaging',              datetime('now','+3 days','start of day','+14 hours'),30, 'Dr. Chapman-Davies', 'scheduled', 'Keratograph 5M'),
-(4, 'Dry Eye Consultation', datetime('now','+4 days','start of day','+9 hours'),  60, 'Regina Chapman-Davies', 'scheduled', 'New patient');
+(4, 'Dry Eye Consultation', datetime('now','+4 days','start of day','+9 hours'),  60, 'Regina Chapman-Davies', 'scheduled', 'New patient'),
+-- PAST (completed) appointments — for demonstrating editing past notes
+(1, 'Dry Eye Consultation', datetime('now','-42 days','start of day','+9 hours'), 60, 'Dr. Chapman-Davies', 'completed', 'Initial consultation. OSDI 32 (moderate-severe). TBUT 4s OU. Meibomian gland dysfunction grade 2. Started on warm compresses BID + preservative-free tears QID. Discussed IPL as next step.'),
+(1, 'Follow-up',            datetime('now','-28 days','start of day','+10 hours'),30, 'Dr. Chapman-Davies', 'completed', '2-week review. Symptoms improving. TBUT now 6s. Compliant with compresses. Proceeding with IPL course of 4.'),
+(2, 'IPL Treatment',        datetime('now','-35 days','start of day','+11 hours'),45, 'Dr. Chapman-Davies', 'completed', 'IPL session 1 of 4. Settings 12 J/cm2, 15 pulses. Well tolerated. Mild transient erythema. Next session in 3 weeks.'),
+(2, 'IPL Treatment',        datetime('now','-14 days','start of day','+11 hours'),45, 'Dr. Chapman-Davies', 'completed', 'IPL session 2 of 4. Increased to 14 J/cm2. Good response. Patient reports less grittiness.'),
+(3, 'Dry Eye Consultation', datetime('now','-21 days','start of day','+13 hours'),60, 'Regina Chapman-Davies', 'completed', 'New patient assessment. Mild dry eye. OSDI 15. Advised lifestyle measures and lubricants. Review in 6 weeks.'),
+(4, 'Imaging',              datetime('now','-7 days','start of day','+15 hours'), 30, 'Dr. Chapman-Davies', 'completed', 'Keratograph imaging. Tear meniscus height reduced. NIBUT 5.2s. Lipid layer thin. Consistent with evaporative dry eye.'),
+(5, 'Follow-up',            datetime('now','-3 days','start of day','+14 hours'), 30, 'Regina Chapman-Davies', 'noshow', 'Patient did not attend. Reception to reschedule.');
 
 INSERT OR IGNORE INTO blocked_times (start_at, end_at, reason, practitioner)
 VALUES

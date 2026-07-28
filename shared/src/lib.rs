@@ -538,6 +538,13 @@ pub struct IntakeSubmission {
     pub source: String,
     pub status: String,
     pub matched_patient_id: Option<i64>,
+    /// What the patient CLAIMED on the public form: Some(true) = returning /
+    /// existing patient, Some(false) = new patient, None = not asked/unknown.
+    #[serde(default)]
+    pub claimed_returning: Option<bool>,
+    /// Set when the patient claimed to be existing but no record was found.
+    #[serde(default)]
+    pub claimed_no_match: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -564,6 +571,10 @@ pub struct CreateIntake {
     pub symptoms: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Patient's own claim on the form: Some(true) = "I've been here before",
+    /// Some(false) = "I'm a new patient", None = question not answered.
+    #[serde(default)]
+    pub claimed_returning: Option<bool>,
 }
 
 // ---------- Messages (unified inbox) ----------
