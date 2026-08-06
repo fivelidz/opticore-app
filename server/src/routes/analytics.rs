@@ -16,10 +16,13 @@ use crate::AppState;
 pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<AnalyticsOverview>> {
     let p: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM patients").fetch_one(&state.db).await?;
     let a: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM appointments").fetch_one(&state.db).await?;
-    let rev: (f64,) = sqlx::query_as("SELECT COALESCE(SUM(amount_paid),0) FROM invoices").fetch_one(&state.db).await?;
-    let out: (f64,) = sqlx::query_as("SELECT COALESCE(SUM(balance_due),0) FROM invoices WHERE status IN ('issued','partially_paid','overdue')").fetch_one(&state.db).await?;
+    // NOTE: CAST(... AS REAL) is required — COALESCE(SUM(...),0) returns SQL type
+    // INTEGER when the table is empty (the literal 0 has INTEGER affinity), which
+    // sqlx cannot decode as f64, causing a 500 on fresh/empty databases.
+    let rev: (f64,) = sqlx::query_as("SELECT CAST(COALESCE(SUM(amount_paid),0) AS REAL) FROM invoices").fetch_one(&state.db).await?;
+    let out: (f64,) = sqlx::query_as("SELECT CAST(COALESCE(SUM(balance_due),0) AS REAL) FROM invoices WHERE status IN ('issued','partially_paid','overdue')").fetch_one(&state.db).await?;
     let am: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM appointments WHERE appointment_date >= date('now','start of month')").fetch_one(&state.db).await?;
-    let rm: (f64,) = sqlx::query_as("SELECT COALESCE(SUM(amount_paid),0) FROM invoices WHERE invoice_date >= date('now','start of month')").fetch_one(&state.db).await?;
+    let rm: (f64,) = sqlx::query_as("SELECT CAST(COALESCE(SUM(amount_paid),0) AS REAL) FROM invoices WHERE invoice_date >= date('now','start of month')").fetch_one(&state.db).await?;
     let avg = if a.0 > 0 { rev.0 / a.0 as f64 } else { 0.0 };
     Ok(Json(AnalyticsOverview {
         total_patients: p.0,
