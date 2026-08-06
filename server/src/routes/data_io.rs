@@ -13,7 +13,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{Acquire, Row};
 
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
@@ -115,12 +115,29 @@ pub async fn import_data(
     let data = snapshot.data.as_object().ok_or(ApiError::BadRequest("invalid snapshot data".into()))?;
     let mut imported = 0;
 
+    // Disable FK enforcement for the duration of the restore and wrap it in a
+    // transaction. Two reasons:
+    //   1. The snapshot's table order is arbitrary (alphabetical), so a
+    //      `DELETE FROM parents` in replace mode would CASCADE-delete already-
+    //      imported child rows (e.g. deleting `patients` wipes `appointments`
+    //      that were inserted moments earlier).
+    //   2. Child rows may reference parents that haven't been inserted yet.
+    // Bulk-load convention: load with FKs off, then re-enable (SQLite validates
+    // integrity on the next write — acceptable for a restore-from-backup path).
+    //
+    // NOTE: PRAGMA foreign_keys is *per-connection* and cannot be set inside a
+    // transaction. So we acquire a dedicated connection, set the pragma on it,
+    // then begin the transaction on that same connection.
+    let mut conn = state.db.acquire().await?;
+    sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await?;
+    let mut tx = (&mut *conn).begin().await?;
+
     // For safety, import only into tables that exist in the snapshot.
     // "replace" mode wipes the table first; "merge" mode skips existing PKs.
     for (table, rows) in data {
         if let Some(arr) = rows.as_array() {
             if mode == "replace" {
-                let _ = sqlx::query(&format!("DELETE FROM {}", table)).execute(&state.db).await;
+                let _ = sqlx::query(&format!("DELETE FROM {}", table)).execute(&mut *tx).await;
             }
             for row in arr {
                 if let Some(obj) = row.as_object() {
@@ -142,12 +159,16 @@ pub async fn import_data(
                             _ => q.bind(v.to_string()),
                         };
                     }
-                    if q.execute(&state.db).await.is_ok() { imported += 1; }
+                    if q.execute(&mut *tx).await.is_ok() { imported += 1; }
                 }
             }
         }
     }
 
+    tx.commit().await?;
+    // Re-enable FK enforcement on this connection before it returns to the pool.
+    sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await?;
+    drop(conn);
     Ok(Json(serde_json::json!({ "imported": imported, "tables": data.len(), "mode": mode, "snapshot_version": snapshot.meta.snapshot_version })))
 }
 
@@ -235,7 +256,9 @@ fn derive_key(passphrase: &str) -> Vec<u8> {
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    // Use a simple base64 via the standard alphabet.
+    // Standard base64 with = padding (RFC 4648). The earlier hand-rolled
+    // version omitted padding and its decode produced extra trailing zero
+    // bytes on non-multiple-of-3 input, corrupting round-trips.
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
@@ -246,21 +269,51 @@ fn base64_encode(bytes: &[u8]) -> String {
         ];
         out.push(CHARS[(b[0] >> 2) as usize] as char);
         out.push(CHARS[(((b[0] & 0x03) << 4) | (b[1] >> 4)) as usize] as char);
-        if chunk.len() > 1 { out.push(CHARS[(((b[1] & 0x0f) << 2) | (b[2] >> 6)) as usize] as char); }
-        if chunk.len() > 2 { out.push(CHARS[(b[2] & 0x3f) as usize] as char); }
+        match chunk.len() {
+            1 => out.push_str("=="),
+            2 => {
+                out.push(CHARS[(((b[1] & 0x0f) << 2) | (b[2] >> 6)) as usize] as char);
+                out.push('=');
+            }
+            _ => {
+                out.push(CHARS[(((b[1] & 0x0f) << 2) | (b[2] >> 6)) as usize] as char);
+                out.push(CHARS[(b[2] & 0x3f) as usize] as char);
+            }
+        }
     }
     out
 }
 
 fn base64_decode(s: &str) -> ApiResult<Vec<u8>> {
+    // Standard base64 decode with = padding awareness (RFC 4648).
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::new();
-    let bytes: Vec<u8> = s.bytes().filter(|b| CHARS.contains(b)).collect();
-    for chunk in bytes.chunks(4) {
-        let v: Vec<u8> = chunk.iter().map(|b| CHARS.iter().position(|&c| c == *b).unwrap_or(0) as u8).collect();
-        out.push((v[0] << 2) | (v.get(1).copied().unwrap_or(0) >> 4));
-        if chunk.len() > 1 { out.push(((v[1] & 0x0f) << 4) | (v.get(2).copied().unwrap_or(0) >> 2)); }
-        if chunk.len() > 2 { out.push(((v[2] & 0x03) << 6) | v.get(3).copied().unwrap_or(0)); }
+    let lookup = |b: u8| -> Option<u8> { CHARS.iter().position(|&c| c == b).map(|p| p as u8) };
+    // Strip padding; we infer tail length from the filtered-char count.
+    let filtered: Vec<u8> = s.bytes().filter(|b| *b != b'=' && *b != b'\n' && *b != b'\r' && *b != b' ').collect();
+    // Each group of 4 base64 chars → 3 bytes. The final group may be short.
+    let mut out = Vec::with_capacity(filtered.len() * 3 / 4);
+    let main = filtered.len() / 4 * 4;
+    for chunk in filtered[..main].chunks(4) {
+        let v: [u8; 4] = [lookup(chunk[0]).unwrap_or(0), lookup(chunk[1]).unwrap_or(0),
+                          lookup(chunk[2]).unwrap_or(0), lookup(chunk[3]).unwrap_or(0)];
+        out.push((v[0] << 2) | (v[1] >> 4));
+        out.push(((v[1] & 0x0f) << 4) | (v[2] >> 2));
+        out.push(((v[2] & 0x03) << 6) | v[3]);
+    }
+    // Handle the tail (1, 2, or 3 remaining base64 chars → 0, 1, or 2 bytes).
+    let tail = &filtered[main..];
+    match tail.len() {
+        0 => {}
+        2 => {
+            let v = [lookup(tail[0]).unwrap_or(0), lookup(tail[1]).unwrap_or(0)];
+            out.push((v[0] << 2) | (v[1] >> 4));
+        }
+        3 => {
+            let v = [lookup(tail[0]).unwrap_or(0), lookup(tail[1]).unwrap_or(0), lookup(tail[2]).unwrap_or(0)];
+            out.push((v[0] << 2) | (v[1] >> 4));
+            out.push(((v[1] & 0x0f) << 4) | (v[2] >> 2));
+        }
+        _ => return Err(ApiError::BadRequest("invalid base64 length".into())),
     }
     Ok(out)
 }
