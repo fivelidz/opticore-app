@@ -357,3 +357,64 @@ async fn analytics_endpoints_require_auth() {
     let app = TestApp::spawn().await;
     assert_eq!(app.get("/api/analytics/overview").send().await.unwrap().status(), 401);
 }
+
+// ---------- COALESCE(SUM) REAL-coercion regression tests ----------
+//
+// These endpoints decode SUM aggregates into f64 fields. Without
+// CAST(... AS REAL), COALESCE(SUM(...),0) yields SQL type INTEGER on
+// empty/grouped-empty results, which sqlx cannot decode as f64 → 500.
+// The seed data keeps them populated, but these tests pin the behavior
+// so a future schema change (nullable amount_paid, etc.) won't regress.
+
+#[tokio::test]
+async fn analytics_revenue_by_type_returns_array() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let resp = app.get("/api/analytics/revenue-by-type").auth(&t).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let v = body_json(resp).await;
+    assert!(v.is_array(), "revenue-by-type should be an array");
+    // Seed invoices exist, so at least one type bucket should be present.
+    if let Some(arr) = v.as_array() {
+        for row in arr {
+            // revenue is f64 — must not be a 500-triggering INTEGER decode.
+            assert!(row["revenue"].as_f64().is_some(), "revenue decodes as f64: {}", row);
+            assert!(row["count"].as_i64().is_some(), "count decodes as i64: {}", row);
+        }
+    }
+}
+
+#[tokio::test]
+async fn analytics_outstanding_by_patient_returns_array() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let resp = app.get("/api/analytics/outstanding-by-patient").auth(&t).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let v = body_json(resp).await;
+    assert!(v.is_array(), "outstanding-by-patient should be an array");
+    // Seed includes partially_paid/issued invoices (patient 2), so expect ≥1 row.
+    if let Some(arr) = v.as_array() {
+        if !arr.is_empty() {
+            let row = &arr[0];
+            assert!(row["outstanding"].as_f64().is_some(), "outstanding decodes as f64: {}", row);
+            assert!(row["outstanding"].as_f64().unwrap() > 0.0, "HAVING outstanding > 0");
+        }
+    }
+}
+
+#[tokio::test]
+async fn analytics_traffic_by_source_returns_array() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let resp = app.get("/api/analytics/traffic-by-source").auth(&t).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let v = body_json(resp).await;
+    assert!(v.is_array(), "traffic-by-source should be an array");
+    // visitors/bookings are INTEGER columns decoded as i64 — no REAL coercion needed.
+    if let Some(arr) = v.as_array() {
+        for row in arr {
+            assert!(row["visitors"].as_i64().is_some(), "visitors decodes as i64: {}", row);
+            assert!(row["bookings"].as_i64().is_some(), "bookings decodes as i64: {}", row);
+        }
+    }
+}

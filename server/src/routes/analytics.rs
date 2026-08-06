@@ -38,7 +38,7 @@ pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<Analytics
 /// Revenue per day for the last N days (default 30).
 pub async fn revenue_series(State(state): State<AppState>, Path(days): Path<i64>) -> ApiResult<Json<Vec<TimeSeriesPoint>>> {
     let rows = sqlx::query(
-        "SELECT DATE(invoice_date) AS d, COALESCE(SUM(amount_paid),0) AS v
+        "SELECT DATE(invoice_date) AS d, CAST(COALESCE(SUM(amount_paid),0) AS REAL) AS v
          FROM invoices
          WHERE invoice_date >= date('now', ?)
          GROUP BY d ORDER BY d")
@@ -114,7 +114,7 @@ pub async fn patient_growth(State(state): State<AppState>, Path(days): Path<i64>
 pub async fn revenue_by_type(State(state): State<AppState>) -> ApiResult<Json<Vec<RevenueByType>>> {
     let rows = sqlx::query(
         "SELECT COALESCE(a.appointment_type, 'Unlinked') AS t,
-                COALESCE(SUM(i.amount_paid), 0) AS rev,
+                CAST(COALESCE(SUM(i.amount_paid), 0) AS REAL) AS rev,
                 COUNT(i.id) AS cnt
          FROM invoices i
          LEFT JOIN appointments a ON a.id = i.appointment_id
@@ -203,7 +203,7 @@ pub async fn outstanding_by_patient(State(state): State<AppState>) -> ApiResult<
         "SELECT p.id AS pid,
                 p.first_name || ' ' || p.last_name AS name,
                 p.mrn AS mrn,
-                COALESCE(SUM(i.balance_due), 0) AS outstanding,
+                CAST(COALESCE(SUM(i.balance_due), 0) AS REAL) AS outstanding,
                 COUNT(i.id) AS invoice_count
          FROM patients p
          JOIN invoices i ON i.patient_id = p.id
