@@ -61,7 +61,31 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
 
 /// On first boot, create an admin user with a randomly-generated password and
 /// print it to the log. Never hardcode credentials (fixes opticore A4/A5/B1).
+///
+/// Production path: reads `DEV_ADMIN_PASSWORD` from the env (or generates a
+/// strong random one if unset). Tests should call [`ensure_admin_with_password`]
+/// instead, to avoid mutating the process-global env var (which races under
+/// parallel `cargo test`).
 pub async fn ensure_admin(pool: &SqlitePool) -> Result<()> {
+    // In dev, allow a fixed password via DEV_ADMIN_PASSWORD (e.g. "admin") so
+    // testers don't have to copy a random one. In production, leave it unset
+    // and a strong random password is generated + printed once.
+    let password = std::env::var("DEV_ADMIN_PASSWORD").unwrap_or_else(|_| generate_password(16));
+    provision_admin(pool, &password).await
+}
+
+/// Provision the first-boot admin with an explicit password.
+///
+/// This is the test-friendly entry point: it does NOT touch the process-global
+/// `DEV_ADMIN_PASSWORD` env var, so it is safe to call from many parallel test
+/// tasks. If an admin already exists, this is a no-op (matches `ensure_admin`).
+pub async fn ensure_admin_with_password(pool: &SqlitePool, password: &str) -> Result<()> {
+    provision_admin(pool, password).await
+}
+
+/// Shared body of [`ensure_admin`] / [`ensure_admin_with_password`]: insert the
+/// admin row if none exists, using the supplied plaintext `password`.
+async fn provision_admin(pool: &SqlitePool, password: &str) -> Result<()> {
     let existing: Option<(i64,)> =
         sqlx::query_as("SELECT COUNT(*) FROM users WHERE role = 'admin'").fetch_optional(pool).await?;
     if let Some((count,)) = existing {
@@ -70,11 +94,7 @@ pub async fn ensure_admin(pool: &SqlitePool) -> Result<()> {
         }
     }
 
-    // In dev, allow a fixed password via DEV_ADMIN_PASSWORD (e.g. "admin") so
-    // testers don't have to copy a random one. In production, leave it unset
-    // and a strong random password is generated + printed once.
-    let password = std::env::var("DEV_ADMIN_PASSWORD").unwrap_or_else(|_| generate_password(16));
-    let hash = crate::auth::hash_password(&password)?;
+    let hash = crate::auth::hash_password(password)?;
 
     sqlx::query(
         "INSERT INTO users (username, email, password_hash, role, first_name, last_name, is_active)

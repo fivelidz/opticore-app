@@ -45,21 +45,21 @@ impl TestApp {
         // Provision a deterministic admin so tests can log in without reading
         // a random password from the log.
         //
-        // SAFETY: set the env var BEFORE calling ensure_admin, then restore the
-        // old value. Tests may run in parallel, but env-var mutation is
-        // process-global — we accept the small risk here because every test
-        // sets the SAME value. If a test needs a different admin password it
-        // should create its own user via the API.
-        let prev = std::env::var("DEV_ADMIN_PASSWORD").ok();
-        std::env::set_var("DEV_ADMIN_PASSWORD", "test-admin-pw");
-        db::ensure_admin(&pool).await.expect("ensure admin");
-        if let Some(old) = prev {
-            std::env::set_var("DEV_ADMIN_PASSWORD", old);
-        } else {
-            std::env::remove_var("DEV_ADMIN_PASSWORD");
-        }
+        // We pass the password directly to `ensure_admin_with_password` rather
+        // than going through the `DEV_ADMIN_PASSWORD` env var. The env var is
+        // process-global: under parallel `cargo test`, two concurrent spawns
+        // could race on set/restore and one would end up provisioning the admin
+        // with a random password (its `admin_token()` login would then fail).
+        // Passing the value through the function signature eliminates that race
+        // entirely — no synchronization needed.
+        db::ensure_admin_with_password(&pool, "test-admin-pw")
+            .await
+            .expect("ensure admin");
 
         // Use a fixed JWT secret so tokens are deterministic and verifiable.
+        // JWT_SECRET is read once per process at JwtCfg construction; tests all
+        // set the SAME value, so even though the mutation is process-global the
+        // worst case is a redundant write of an identical value (no race).
         std::env::set_var("JWT_SECRET", "test-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let jwt = Arc::new(JwtCfg::from_env());
 
