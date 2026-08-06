@@ -24,36 +24,10 @@ pub struct AppState {
     pub jwt: Arc<auth::JwtCfg>,
 }
 
-/// Start the HTTP server. Blocks until the server stops.
-/// Called by either the standalone server binary or the Tauri app.
-pub async fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "server=info,tower_http=info".into()),
-        )
-        .init();
-
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "sqlite://opticore.db?mode=rwc".to_string()
-    });
-
-    let pool = db::init_pool(&db_url).await?;
-    db::run_migrations(&pool).await?;
-    db::ensure_admin(&pool).await?;
-
-    let jwt = Arc::new(auth::JwtCfg::from_env());
-    let state = AppState { db: pool.clone(), jwt };
-
-    sync::start(state.clone());
-
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
-
-    let static_input = tower_http::services::ServeFile::new("server/static/input.html");
-    let static_showcase = tower_http::services::ServeFile::new("server/static/showcase.html");
-    let static_online = tower_http::services::ServeFile::new("server/static/online-booking.html");
-
-    let public = Router::new()
+/// Build the public (unauthenticated) sub-router. Does NOT include static file
+/// routes — those are added by `run()` since they depend on the runtime cwd.
+fn public_router() -> Router<AppState> {
+    Router::new()
         .route("/api/health", get(health))
         .route("/api/auth/login", post(routes::auth::login))
         .route("/api/intake/submit", post(routes::intake::submit))
@@ -61,11 +35,11 @@ pub async fn run() -> Result<()> {
         .route("/api/public/availability/:days", get(routes::public_api::availability))
         .route("/api/public/appointment-types", get(routes::public_api::appointment_types))
         .route("/api/public/match-patient", post(routes::public_api::match_patient))
-        .route_service("/input", static_input)
-        .route_service("/showcase", static_showcase)
-        .route_service("/book", static_online);
+}
 
-    let protected = Router::new()
+/// Build the protected (auth-required) sub-router.
+fn protected_router(state: AppState) -> Router<AppState> {
+    Router::new()
         .route("/api/auth/me", get(routes::auth::me))
         .route("/api/auth/change-password", post(routes::change_password::change_password))
         .route("/api/patients", get(routes::patients::list).post(routes::patients::create))
@@ -124,24 +98,72 @@ pub async fn run() -> Result<()> {
         .route("/api/intake/:id/decline", post(routes::booking_settings::decline_intake))
         .route("/api/sync/status", get(sync_status))
         .route("/api/sync/now", post(sync_now))
-        .layer(middleware::from_fn_with_state(state.clone(), auth::auth_middleware));
+        .layer(middleware::from_fn_with_state(state.clone(), auth::auth_middleware))
+}
 
-    let admin = Router::new()
+/// Build the admin (admin-role-required) sub-router.
+fn admin_router(state: AppState) -> Router<AppState> {
+    Router::new()
         .route("/api/users", get(routes::users::list).post(routes::users::create))
         .route("/api/users/:id", axum::routing::put(routes::users::update).delete(routes::users::delete))
         .route("/api/users/:id/toggle", post(routes::users::toggle_active))
         .route("/api/data/export", post(routes::data_io::export_data))
         .route("/api/data/import", post(routes::data_io::import_data))
         .route("/api/data/version", get(routes::data_io::version_info))
-        .layer(middleware::from_fn_with_state(state.clone(), auth::require_admin));
+        .layer(middleware::from_fn_with_state(state.clone(), auth::require_admin))
+}
 
-    let app = Router::new()
-        .merge(public)
-        .merge(protected)
-        .merge(admin)
+/// Build the full application Router from an AppState, including CORS + tracing
+/// layers but NOT the static-file routes (those are cwd-dependent and only
+/// relevant to the running server, not to tests).
+///
+/// Exposed publicly so integration tests can construct the app without binding
+/// a TCP socket — they drive it with `tower::ServiceExt::oneshot` or a
+/// `reqwest` client against a bound ephemeral port.
+pub fn build_app(state: AppState) -> Router {
+    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    Router::new()
+        .merge(public_router())
+        .merge(protected_router(state.clone()))
+        .merge(admin_router(state.clone()))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(state)
+}
+
+/// Start the HTTP server. Blocks until the server stops.
+/// Called by either the standalone server binary or the Tauri app.
+pub async fn run() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "server=info,tower_http=info".into()),
+        )
+        .init();
+
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "sqlite://opticore.db?mode=rwc".to_string()
+    });
+
+    let pool = db::init_pool(&db_url).await?;
+    db::run_migrations(&pool).await?;
+    db::ensure_admin(&pool).await?;
+
+    let jwt = Arc::new(auth::JwtCfg::from_env());
+    let state = AppState { db: pool.clone(), jwt };
+
+    sync::start(state.clone());
+
+    // Static HTML pages served from disk (cwd-dependent; not part of build_app
+    // so tests don't need the static files to exist).
+    let static_input = tower_http::services::ServeFile::new("server/static/input.html");
+    let static_showcase = tower_http::services::ServeFile::new("server/static/showcase.html");
+    let static_online = tower_http::services::ServeFile::new("server/static/online-booking.html");
+
+    let app = build_app(state)
+        .route_service("/input", static_input)
+        .route_service("/showcase", static_showcase)
+        .route_service("/book", static_online);
 
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
