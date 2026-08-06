@@ -220,7 +220,10 @@ pub async fn detail(
     let first_visit: Option<String> = srow.get("first_visit");
     let last_visit: Option<String> = srow.get("last_visit");
 
-    let mrow = sqlx::query("SELECT COALESCE(SUM(amount_paid),0) AS spent, COALESCE(SUM(balance_due),0) AS outstanding FROM invoices WHERE patient_id = ?")
+    // NOTE: CAST(... AS REAL) — COALESCE(SUM(...),0) returns SQL type INTEGER
+    // when no rows match (the literal 0 has INTEGER affinity), which sqlx
+    // cannot decode as f64. Same bug class as analytics::overview.
+    let mrow = sqlx::query("SELECT CAST(COALESCE(SUM(amount_paid),0) AS REAL) AS spent, CAST(COALESCE(SUM(balance_due),0) AS REAL) AS outstanding FROM invoices WHERE patient_id = ?")
         .bind(id)
         .fetch_one(&state.db)
         .await?;
