@@ -20,6 +20,38 @@ use crate::AppState;
 
 const SNAPSHOT_VERSION: u32 = 1;
 
+/// The set of tables that `import_data` is allowed to write into.
+///
+/// This is the same list `export_data` dumps (see `export_data`'s `tables`
+/// array). It serves as an **allowlist** during import: any table name in the
+/// snapshot that is not in this set is rejected with a 400 Bad Request. This
+/// prevents SQL injection via the table-name identifier (which is
+/// interpolated into `DELETE FROM {table}` / `INSERT INTO {table} ...`).
+const VALID_IMPORT_TABLES: &[&str] = &[
+    "patients", "appointments", "blocked_times", "clinical_notes", "allergies",
+    "osdi_scores", "ipl_treatments", "invoices", "invoice_items", "payments",
+    "consultation_types", "services", "intake_submissions", "messages",
+    "website_events", "users", "patient_photos",
+];
+
+/// Returns true if `s` is a safe SQL identifier to interpolate into a query.
+///
+/// SQLite identifiers follow the pattern `[A-Za-z_][A-Za-z0-9_]*` (or are
+/// quoted with backticks/quotes, which we reject here since the export never
+/// produces them). This rejects any column name containing spaces, semicolons,
+/// quotes, or other SQL metacharacters — preventing column-name injection.
+fn is_safe_identifier(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotMeta {
     pub snapshot_version: u32,
@@ -140,7 +172,29 @@ pub async fn import_data(
 
     // For safety, import only into tables that exist in the snapshot.
     // "replace" mode wipes the table first; "merge" mode skips existing PKs.
+    //
+    // SECURITY: validate every table name and column name BEFORE interpolating
+    // it into SQL. The `table` and column names come from the imported JSON
+    // snapshot's keys — user-controlled input. Previously they were
+    // interpolated directly into `DELETE FROM {table}` and
+    // `INSERT OR IGNORE INTO {table} ({cols}) ...`, which is a SQL injection
+    // vector (a malicious snapshot could set a table key to
+    // `patients; DROP TABLE users; --` or a column name containing SQL
+    // syntax). The *values* were always parameterized, but the *identifiers*
+    // were not.
+    //
+    // Fix: table names must appear in a static allowlist (the same 17 tables
+    // `export_data` knows about); column names must match a strict SQLite
+    // identifier pattern (`[A-Za-z_][A-Za-z0-9_]*`). Any violation aborts the
+    // import with a 400 Bad Request.
     for (table, rows) in data {
+        // Validate table name against the allowlist.
+        if !VALID_IMPORT_TABLES.contains(&table.as_str()) {
+            return Err(ApiError::BadRequest(format!(
+                "unknown or invalid table name in snapshot: {:?}",
+                table
+            )));
+        }
         if let Some(arr) = rows.as_array() {
             if mode == "replace" {
                 let _ = sqlx::query(&format!("DELETE FROM {}", table)).execute(&mut *tx).await;
@@ -149,6 +203,17 @@ pub async fn import_data(
                 if let Some(obj) = row.as_object() {
                     // generic insert: build INSERT from the JSON keys
                     let cols: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+                    // Validate every column name is a safe SQL identifier.
+                    // This prevents column-name injection (e.g. a key of
+                    // `first_name; DROP TABLE users; --`).
+                    for col in &cols {
+                        if !is_safe_identifier(col) {
+                            return Err(ApiError::BadRequest(format!(
+                                "invalid column name in snapshot: {:?}",
+                                col
+                            )));
+                        }
+                    }
                     let placeholders: Vec<String> = (0..cols.len()).map(|i| format!("?{}", i + 1)).collect();
                     let sql = format!("INSERT OR IGNORE INTO {} ({}) VALUES ({})", table, cols.join(","), placeholders.join(","));
                     let mut q = sqlx::query(&sql);
