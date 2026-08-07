@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-type Section = "overview" | "getting-started" | "patients" | "calendar" | "intake" | "billing" | "messages" | "analytics" | "users" | "backup" | "architecture" | "sync" | "faq";
+type Section = "overview" | "getting-started" | "patients" | "calendar" | "intake" | "billing" | "messages" | "analytics" | "users" | "backup" | "architecture" | "sync" | "lan" | "faq";
 
 const SECTIONS: [Section, string, string][] = [
   ["overview", "📋 Overview", "What OptiCore is and how it fits together"],
@@ -15,6 +15,7 @@ const SECTIONS: [Section, string, string][] = [
   ["backup", "💾 Backup & Data", "Export, import, version safety"],
   ["architecture", "🏗️ Architecture", "How the system works under the hood"],
   ["sync", "🔄 Cloudflare Sync", "How online bookings sync to the app"],
+  ["lan", "🌐 Multi-Device (LAN)", "Use OptiCore from tablets & other PCs"],
   ["faq", "❓ FAQ", "Common questions"],
 ];
 
@@ -49,6 +50,7 @@ export function GuidePage() {
         {section === "backup" && <Backup />}
         {section === "architecture" && <Architecture />}
         {section === "sync" && <Sync />}
+        {section === "lan" && <LAN />}
         {section === "faq" && <FAQ />}
       </main>
 
@@ -275,6 +277,59 @@ SYNC_SECRET=your-shared-secret</pre>
   </div>;
 }
 
+function LAN() {
+  return <div>
+    <H>Use OptiCore From Any Device on Your Network</H>
+    <P>OptiCore isn't limited to the computer it runs on. Any tablet, laptop, or desktop on the same network can open the full PMS in a web browser — no app install needed. Every device reads and writes the <strong>same database</strong>, so everyone sees the same data in real time.</P>
+
+    <Callout type="tip">Reception desk on a desktop, optometrist on a tablet, practice manager on a laptop — all hitting the same shared database. No sync buttons, no "refresh to see changes" — it's live.</Callout>
+
+    <H>How It Works</H>
+    <P>The OptiCore server listens on <strong>all network interfaces</strong> (not just localhost), so any device that can reach the server computer over WiFi or Ethernet can connect. The database uses <strong>WAL mode</strong> (Write-Ahead Logging), which lets multiple devices read and write simultaneously without "database is locked" errors.</P>
+
+    <H>Step-by-Step Setup</H>
+    <Step n="1" title="Start the server on the main computer">Launch OptiCore on the computer that will act as the server (the one that stays on during clinic hours). The server prints its address in the console: <code>🩺 OptiCore server listening on http://0.0.0.0:3000</code></Step>
+    <Step n="2" title="Find the server computer's IP address">On the server computer, open a terminal and run:<br /><pre className="g-code">ip addr | grep "inet " | grep -v 127.0.0.1</pre>You'll see something like <code>192.168.0.11</code>. That's the address other devices use. (On Windows, run <code>ipconfig</code> in Command Prompt and look for the IPv4 Address.)</Step>
+    <Step n="3" title="Open the browser on another device">On your tablet, laptop, or phone — anything connected to the <strong>same WiFi network</strong> — open a web browser and navigate to:<br /><pre className="g-code">http://192.168.0.11:3000</pre>(replace with your actual IP from step 2). The full OptiCore interface loads — login, patients, calendar, billing, everything.</Step>
+    <Step n="4" title="Log in">Use the same credentials as the desktop app. The default first-login is <code>admin</code> / <code>admin</code>. Each staff member can log in from any device with their own account.</Step>
+
+    <H>Accessing From Outside the Clinic (Remote)</H>
+    <P>If you need to access OptiCore from outside the clinic WiFi — from home, or from a different building — use <strong>Tailscale</strong> (free, recommended) or any VPN:</P>
+    <Step n="1" title="Install Tailscale">Install Tailscale on the server computer and on the remote device. Both join the same Tailnet.</Step>
+    <Step n="2" title="Use the Tailscale IP">The server computer gets a Tailscale IP (e.g. <code>100.73.134.20</code>). From the remote device, navigate to <code>http://100.73.134.20:3000</code>. It works exactly like being on the clinic WiFi.</Step>
+    <Callout type="security">Tailscale creates an encrypted WireGuard tunnel between your devices. The traffic is end-to-end encrypted — safer than port-forwarding or exposing the server to the public internet. Never port-forward port 3000 to the public internet without additional security layers.</Callout>
+
+    <H>Firewall</H>
+    <P>If another device can't connect (browser says "connection refused" or times out), the server computer's firewall may be blocking port 3000. On Linux, open it with:</P>
+    <pre className="g-code">sudo firewall-cmd --add-port=3000/tcp --permanent && sudo firewall-cmd --reload
+# or with ufw:
+sudo ufw allow 3000/tcp</pre>
+    <P>On Windows, a firewall prompt may appear the first time you start the server — click "Allow access". On macOS, the firewall is usually permissive for local network services.</P>
+
+    <H>Troubleshooting</H>
+    <div className="g-faq">
+      <div className="g-faq-item">
+        <strong>"This site can't be reached" / connection refused</strong>
+        <P>The server isn't running, or the firewall is blocking port 3000. First check the server is up: on the server computer, open <code>http://localhost:3000/api/health</code> in a browser — you should see a JSON status response. If that works but other devices can't connect, it's the firewall.</P>
+      </div>
+      <div className="g-faq-item">
+        <strong>UI loads but it's blank / API errors in console</strong>
+        <P>This shouldn't happen — the frontend uses relative URLs so it automatically targets whatever address you loaded it from. Try a hard refresh (Ctrl+Shift+R or Cmd+Shift+R) to clear cached files.</P>
+      </div>
+      <div className="g-faq-item">
+        <strong>"Database is locked" error</strong>
+        <P>Extremely rare with WAL mode (which allows concurrent readers + one writer). If it persists, it means sustained heavy write contention from many devices at once. For a typical clinic (a few devices), this never happens.</P>
+      </div>
+      <div className="g-faq-item">
+        <strong>Changes not appearing on another device</strong>
+        <P>All devices share the same database file, so writes are immediately visible. If something looks stale, hard-refresh the browser (Ctrl+Shift+R).</P>
+      </div>
+    </div>
+
+    <Callout type="info">The server computer must stay on and awake while other devices are using it. If it sleeps or shuts down, all other devices lose connection until it's back. Set the server computer's power settings to never sleep during clinic hours.</Callout>
+  </div>;
+}
+
 function FAQ() {
   return <div>
     <H>Frequently Asked Questions</H>
@@ -289,7 +344,7 @@ function FAQ() {
       </div>
       <div className="g-faq-item">
         <strong>Q: Can I use it on multiple computers?</strong>
-        <P>Yes. One computer runs as the server (the "always-on" PC). Other computers on the same network run the Tauri app and connect to it. Everyone sees the same data.</P>
+        <P>Yes — tablets, laptops, and desktops can all access the same data. One computer runs as the server, and every other device opens <code>http://&lt;server-IP&gt;:3000</code> in a browser. See the <strong>🌐 Multi-Device (LAN)</strong> section above for the full guide.</P>
       </div>
       <div className="g-faq-item">
         <strong>Q: Does it work without internet?</strong>
