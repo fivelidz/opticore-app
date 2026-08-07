@@ -61,7 +61,7 @@ pub async fn list_allergies(State(state): State<AppState>, Path(pid): Path<i64>)
     }).collect()))
 }
 
-pub async fn add_allergy(State(state): State<AppState>, Json(b): Json<CreateAllergy>) -> ApiResult<Json<Allergy>> {
+pub async fn add_allergy(State(state): State<AppState>, Json(b): Json<CreateAllergy>) -> ApiResult<axum::response::Response> {
     // `substance` is VARCHAR(200) NOT NULL, but that accepts the empty string.
     // An allergy with no substance is meaningless.
     if b.substance.trim().is_empty() {
@@ -73,10 +73,11 @@ pub async fn add_allergy(State(state): State<AppState>, Json(b): Json<CreateAlle
         .bind(b.patient_id).bind(&b.substance).bind(&b.severity).execute(&state.db).await?;
     let id = r.last_insert_rowid();
     let row = sqlx::query("SELECT * FROM allergies WHERE id = ?").bind(id).fetch_one(&state.db).await?;
-    Ok(Json(Allergy {
+    use axum::response::IntoResponse;
+    Ok((axum::http::StatusCode::CREATED, Json(Allergy {
         id: row.get("id"), patient_id: row.get("patient_id"), substance: row.get("substance"),
         severity: row.get("severity"), noted_at: row.get("noted_at"),
-    }))
+    })).into_response())
 }
 
 pub async fn del_allergy(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<shared::MessageResponse>> {
@@ -97,7 +98,7 @@ pub async fn list_osdi(State(state): State<AppState>, Path(pid): Path<i64>) -> A
     }).collect()))
 }
 
-pub async fn add_osdi(State(state): State<AppState>, Json(b): Json<CreateOsdi>) -> ApiResult<Json<OsdiScore>> {
+pub async fn add_osdi(State(state): State<AppState>, Json(b): Json<CreateOsdi>) -> ApiResult<axum::response::Response> {
     // OSDI total_score is a severity score in the range [0, 100]. Negative
     // values are meaningless. (We do not upper-bound at 100 here because the
     // raw-sum subscores can legitimately exceed 100 before normalization; the
@@ -144,12 +145,13 @@ pub async fn add_osdi(State(state): State<AppState>, Json(b): Json<CreateOsdi>) 
         .execute(&state.db).await?;
     let id = r.last_insert_rowid();
     let row = sqlx::query("SELECT * FROM osdi_scores WHERE id = ?").bind(id).fetch_one(&state.db).await?;
-    Ok(Json(OsdiScore {
+    use axum::response::IntoResponse;
+    Ok((axum::http::StatusCode::CREATED, Json(OsdiScore {
         id: row.get("id"), patient_id: row.get("patient_id"), score_date: row.get("score_date"),
         total_score: row.get("total_score"), ocular_symptoms: row.get("ocular_symptoms"),
         vision_function: row.get("vision_function"), environmental_triggers: row.get("environmental_triggers"),
         created_at: row.get("created_at"),
-    }))
+    })).into_response())
 }
 
 // ---------- IPL ----------
@@ -165,7 +167,7 @@ pub async fn list_ipl(State(state): State<AppState>, Path(pid): Path<i64>) -> Ap
     }).collect()))
 }
 
-pub async fn add_ipl(State(state): State<AppState>, Json(b): Json<CreateIpl>) -> ApiResult<Json<IplTreatment>> {
+pub async fn add_ipl(State(state): State<AppState>, Json(b): Json<CreateIpl>) -> ApiResult<axum::response::Response> {
     // Treatment sessions are 1-indexed; session_number < 1 is nonsensical.
     if b.session_number < 1 {
         return Err(ApiError::BadRequest(
@@ -214,10 +216,11 @@ pub async fn add_ipl(State(state): State<AppState>, Json(b): Json<CreateIpl>) ->
         .execute(&state.db).await?;
     let id = r.last_insert_rowid();
     let row = sqlx::query("SELECT * FROM ipl_treatments WHERE id = ?").bind(id).fetch_one(&state.db).await?;
-    Ok(Json(IplTreatment {
+    use axum::response::IntoResponse;
+    Ok((axum::http::StatusCode::CREATED, Json(IplTreatment {
         id: row.get("id"), patient_id: row.get("patient_id"), treatment_date: row.get("treatment_date"),
         session_number: row.get("session_number"), fluence_j_cm2: row.get("fluence_j_cm2"),
         number_of_pulses: row.get("number_of_pulses"), operator_name: row.get("operator_name"),
         clinical_notes: row.get("clinical_notes"), created_at: row.get("created_at"),
-    }))
+    })).into_response())
 }

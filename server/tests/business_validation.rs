@@ -126,7 +126,7 @@ async fn invoice_allows_zero_unit_price() {
         }],
     });
     let resp = app.post("/api/billing/invoices").auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 200, "zero unit_price (free item) should be accepted");
+    assert_eq!(resp.status(), 201, "zero unit_price (free item) should be accepted");
     let v = body_json(resp).await;
     assert_eq!(v["total_amount"], 0.0);
 }
@@ -308,7 +308,7 @@ async fn payment_rejects_overpayment_on_second_partial_payment() {
     // Pay 60 — OK (balance 40).
     let pay = serde_json::json!({ "invoice_id": inv_id, "amount": 60.0, "payment_method": "card" });
     let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 201);
 
     // Pay 50 — would overpay (60 + 50 > 100).
     let pay = serde_json::json!({ "invoice_id": inv_id, "amount": 50.0, "payment_method": "card" });
@@ -326,7 +326,7 @@ async fn payment_exact_balance_is_allowed() {
     let inv_id = inv["id"].as_i64().unwrap();
     let pay = serde_json::json!({ "invoice_id": inv_id, "amount": 100.0, "payment_method": "cash" });
     let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
-    assert_eq!(resp.status(), 200, "exact-balance payment must be accepted");
+    assert_eq!(resp.status(), 201, "exact-balance payment must be accepted");
 }
 
 // =====================================================================

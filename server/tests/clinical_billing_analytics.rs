@@ -73,7 +73,7 @@ async fn add_and_list_allergy() {
         "patient_id": pid, "substance": "Penicillin", "severity": "severe",
     });
     let resp = app.post("/api/allergies").auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 201);
     let v = body_json(resp).await;
     assert_eq!(v["substance"], "Penicillin");
     assert_eq!(v["severity"], "severe");
@@ -111,7 +111,7 @@ async fn add_and_list_osdi() {
         "environmental_triggers": 10.0,
     });
     let resp = app.post(&format!("/api/patients/{}/osdi", pid)).auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 201);
     let v = body_json(resp).await;
     assert_eq!(v["total_score"], 32.5);
 
@@ -134,7 +134,7 @@ async fn add_and_list_ipl() {
         "operator_name": "Dr. Test",
     });
     let resp = app.post(&format!("/api/patients/{}/ipl", pid)).auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 201);
     let v = body_json(resp).await;
     assert_eq!(v["session_number"], 1);
     assert_eq!(v["fluence_j_cm2"], 12.0);
@@ -192,7 +192,7 @@ async fn create_invoice_computes_totals() {
         ],
     });
     let resp = app.post("/api/billing/invoices").auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 201);
     let v = body_json(resp).await;
     // subtotal = 500, tax = 50, total = 550.
     assert_eq!(v["subtotal"], 500.0);
@@ -240,7 +240,7 @@ async fn add_payment_updates_invoice_balance() {
         "invoice_id": inv_id, "amount": 200.0, "payment_method": "card",
     });
     let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 201);
     let v = body_json(resp).await;
     assert_eq!(v["amount"], 200.0);
 

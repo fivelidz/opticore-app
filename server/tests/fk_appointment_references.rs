@@ -95,7 +95,7 @@ async fn invoice_with_valid_appointment_id_links_and_persists() {
         ],
     });
     let resp = app.post("/api/billing/invoices").auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 200, "invoice with valid appointment_id should succeed");
+    assert_eq!(resp.status(), 201, "invoice with valid appointment_id should succeed");
     let v = body_json(resp).await;
     let inv_id = v["id"].as_i64().unwrap();
     assert_eq!(v["appointment_id"], aid, "response echoes the linked appointment_id");

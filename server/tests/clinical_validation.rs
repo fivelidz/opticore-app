@@ -273,7 +273,7 @@ async fn allergy_with_valid_substance_is_accepted() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "valid allergy should succeed");
+    assert_eq!(resp.status(), 201, "valid allergy should succeed");
 }
 
 // =====================================================================
@@ -342,7 +342,7 @@ async fn ipl_with_valid_session_number_is_accepted() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "valid IPL session_number should succeed");
+    assert_eq!(resp.status(), 201, "valid IPL session_number should succeed");
 }
 
 // =====================================================================
@@ -392,7 +392,7 @@ async fn osdi_with_zero_total_score_is_accepted() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "OSDI total_score of 0 should succeed");
+    assert_eq!(resp.status(), 201, "OSDI total_score of 0 should succeed");
 }
 
 // =====================================================================
@@ -521,7 +521,7 @@ async fn ipl_with_zero_fluence_is_accepted() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "IPL with zero fluence should succeed");
+    assert_eq!(resp.status(), 201, "IPL with zero fluence should succeed");
 }
 
 #[tokio::test]
@@ -542,7 +542,7 @@ async fn ipl_with_null_fluence_is_accepted() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "IPL with no fluence should succeed");
+    assert_eq!(resp.status(), 201, "IPL with no fluence should succeed");
 }
 
 // =====================================================================
@@ -651,7 +651,7 @@ async fn ipl_with_past_treatment_date_is_accepted() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        200,
+        201,
         "IPL with a past treatment_date should succeed (historical record)"
     );
 }
@@ -706,7 +706,7 @@ async fn osdi_with_zero_subscore_is_accepted() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "OSDI with zero subscore should succeed");
+    assert_eq!(resp.status(), 201, "OSDI with zero subscore should succeed");
 }
 
 // =====================================================================
@@ -757,7 +757,7 @@ async fn osdi_with_valid_score_date_is_normalized() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "valid OSDI score_date should succeed");
+    assert_eq!(resp.status(), 201, "valid OSDI score_date should succeed");
     let v = body_json(resp).await;
     // Should be normalized to "2026-06-15 00:00:00", not the raw RFC3339.
     assert_eq!(v["score_date"], "2026-06-15 00:00:00");

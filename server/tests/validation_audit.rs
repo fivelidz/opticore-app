@@ -67,7 +67,7 @@ async fn create_invoice(app: &TestApp, t: &str, pid: i64) -> i64 {
         "items": [{ "item_type": "consultation", "description": "Consult", "quantity": 1.0, "unit_price": 100.0 }],
     });
     let resp = app.post("/api/billing/invoices").auth(t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 200, "invoice create should succeed");
+    assert_eq!(resp.status(), 201, "invoice create should succeed");
     body_json(resp).await["id"].as_i64().unwrap()
 }
 

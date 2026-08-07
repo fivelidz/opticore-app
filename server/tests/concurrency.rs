@@ -91,7 +91,7 @@ async fn concurrent_invoice_creation_no_duplicate_numbers() {
         }));
     }
 
-    // Collect results. Every request should succeed (200); none should 500.
+    // Collect results. Every request should succeed (201); none should 500.
     let mut statuses = Vec::with_capacity(n);
     for h in handles {
         let resp = h.await.expect("task panicked").expect("send failed");
@@ -105,7 +105,7 @@ async fn concurrent_invoice_creation_no_duplicate_numbers() {
         statuses.push(status);
     }
 
-    let ok = statuses.iter().filter(|&&s| s == 200).count();
+    let ok = statuses.iter().filter(|&&s| s == 201).count();
     assert_eq!(
         ok, n,
         "all {} concurrent invoice creates should succeed, but only {} did (statuses: {:?})",
@@ -136,7 +136,7 @@ async fn sequential_invoice_creation_distinct_numbers() {
     let mut numbers = Vec::new();
     for _ in 0..5 {
         let resp = app.post("/api/billing/invoices").auth(&t).json(&invoice_body(pid)).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), 201);
         numbers.push(body_json(resp).await["invoice_number"].as_str().unwrap().to_string());
     }
 
@@ -190,7 +190,7 @@ async fn concurrent_payments_no_lost_update() {
         let resp = h.await.expect("task panicked").expect("send failed");
         let status = resp.status().as_u16();
         assert_ne!(status, 500, "concurrent payment returned 500");
-        if status == 200 { ok += 1; }
+        if status == 201 { ok += 1; }
     }
     assert_eq!(ok, n, "all {} concurrent payments should succeed", n);
 
@@ -259,7 +259,7 @@ async fn concurrent_payments_cannot_overpay() {
         "items": [{ "item_type": "consultation", "description": "Hundred", "quantity": 1.0, "unit_price": 100.0 }],
     });
     let r = app.post("/api/billing/invoices").auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(r.status(), 200);
+    assert_eq!(r.status(), 201);
     let inv_id = body_json(r).await["id"].as_i64().unwrap();
 
     // 10 concurrent $60 payments against a $100 invoice. At most ONE can
@@ -288,7 +288,7 @@ async fn concurrent_payments_cannot_overpay() {
         statuses.push(status);
     }
 
-    let accepted = statuses.iter().filter(|&&s| s == 200).count();
+    let accepted = statuses.iter().filter(|&&s| s == 201).count();
     let rejected = statuses.iter().filter(|&&s| s == 400).count();
     eprintln!("overpay-race: statuses={:?} accepted={} rejected={}", statuses, accepted, rejected);
 

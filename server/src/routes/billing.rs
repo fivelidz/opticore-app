@@ -81,7 +81,7 @@ pub async fn invoices_by_patient(State(state): State<AppState>, Path(pid): Path<
     Ok(Json(out))
 }
 
-pub async fn create_invoice(State(state): State<AppState>, Json(b): Json<CreateInvoice>) -> ApiResult<Json<Invoice>> {
+pub async fn create_invoice(State(state): State<AppState>, Json(b): Json<CreateInvoice>) -> ApiResult<axum::response::Response> {
     // ---- Business-rule validation --------------------------------------
     //
     // An invoice represents a real financial obligation. Invalid line items
@@ -208,7 +208,13 @@ pub async fn create_invoice(State(state): State<AppState>, Json(b): Json<CreateI
     // never persisted.
     sqlx::query("COMMIT").execute(&mut *conn).await?;
 
-    Ok(Json(Invoice {
+    // Return 201 Created — this handler creates a new invoice resource. Most
+    // other create handlers in the app already return 201 (patients,
+    // appointments, users, photos, notes, blocked-times, intake, messages);
+    // billing was previously inconsistent (200). The body is the full invoice
+    // row + items, same as before.
+    use axum::response::IntoResponse;
+    Ok((axum::http::StatusCode::CREATED, Json(Invoice {
         id: inv_id, invoice_number: row.get("invoice_number"), patient_id: row.get("patient_id"),
         appointment_id: row.get("appointment_id"), invoice_date: row.get("invoice_date"),
         due_date: row.get("due_date"), subtotal: row.get("subtotal"), tax_amount: row.get("tax_amount"),
@@ -216,7 +222,7 @@ pub async fn create_invoice(State(state): State<AppState>, Json(b): Json<CreateI
         amount_paid: row.get("amount_paid"), balance_due: row.get("balance_due"), status: row.get("status"),
         payment_method: row.get("payment_method"), notes: row.get("notes"), created_at: row.get("created_at"),
         items,
-    }))
+    })).into_response())
 }
 
 // ---------- Payments ----------
@@ -231,7 +237,7 @@ pub async fn payments_by_invoice(State(state): State<AppState>, Path(inv): Path<
     }).collect()))
 }
 
-pub async fn add_payment(State(state): State<AppState>, Json(b): Json<CreatePayment>) -> ApiResult<Json<Payment>> {
+pub async fn add_payment(State(state): State<AppState>, Json(b): Json<CreatePayment>) -> ApiResult<axum::response::Response> {
     // ---- Business-rule validation --------------------------------------
     //
     // Payments are financial transactions. Three classes of invalid input
@@ -360,9 +366,11 @@ pub async fn add_payment(State(state): State<AppState>, Json(b): Json<CreatePaym
     // persisted.
     sqlx::query("COMMIT").execute(&mut *conn).await?;
 
-    Ok(Json(Payment {
+    // Return 201 Created — this handler creates a new payment resource.
+    use axum::response::IntoResponse;
+    Ok((axum::http::StatusCode::CREATED, Json(Payment {
         id: row.get("id"), invoice_id: row.get("invoice_id"), payment_date: row.get("payment_date"),
         amount: row.get("amount"), payment_method: row.get("payment_method"),
         reference_number: row.get("reference_number"), notes: row.get("notes"), created_at: row.get("created_at"),
-    }))
+    })).into_response())
 }
