@@ -122,10 +122,11 @@ pub async fn auto_import(State(state): State<AppState>) -> ApiResult<Json<serde_
     let mut imported = 0;
     for r in &rows {
         let id: i64 = r.get("id");
-        // reuse the single-import logic
-        if import_one(&state, id).await.is_ok() {
-            imported += 1;
-        }
+        // Propagate import errors — previously `if import_one(...).is_ok()`
+        // silently swallowed per-submission failures (e.g. a constraint
+        // violation on one row), reporting a partial count as if it succeeded.
+        import_one(&state, id).await?;
+        imported += 1;
     }
     Ok(Json(serde_json::json!({ "imported": imported, "total_new": total })))
 }

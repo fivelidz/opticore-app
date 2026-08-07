@@ -38,16 +38,31 @@ pub async fn run_sync_cycle(state: &AppState) -> ApiResult<()> {
     };
     let secret = std::env::var("SYNC_SECRET").unwrap_or_else(|_| "dev-sync-secret".into());
 
+    // Collect errors from both phases so a push failure doesn't mask a pull
+    // (and vice versa), but still surface DB/network failures to the caller.
+    // Previously each phase's error was silently swallowed at DEBUG level,
+    // which meant `sync_now` returned 200 even when the DB was completely down.
+    let mut errs: Vec<String> = Vec::new();
+
     // 1. PUSH availability + types
     if let Err(e) = push_to_worker(state, &worker_url, &secret).await {
         tracing::debug!("push to worker failed (non-fatal): {e}");
+        errs.push(format!("push: {e}"));
     }
 
     // 2. PULL pending bookings
     if let Err(e) = pull_from_worker(state, &worker_url, &secret).await {
         tracing::debug!("pull from worker failed (non-fatal): {e}");
+        errs.push(format!("pull: {e}"));
     }
 
+    if let Some(first) = errs.into_iter().next() {
+        // Surface the first error so the caller (sync_now endpoint or the
+        // background loop) knows the cycle didn't fully succeed. Network
+        // errors and DB errors are both propagated; the background loop logs
+        // them at WARN and continues, while sync_now returns 500.
+        return Err(crate::error::ApiError::Internal(first));
+    }
     Ok(())
 }
 

@@ -18,6 +18,8 @@ use axum::{
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::error::ApiResult;
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: sqlx::SqlitePool,
@@ -185,27 +187,30 @@ async fn health(axum::extract::State(_s): axum::extract::State<AppState>) -> axu
 
 async fn sync_status(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<serde_json::Value> {
+) -> ApiResult<axum::Json<serde_json::Value>> {
     let worker_url = std::env::var("WORKER_URL").unwrap_or_default();
     let configured = !worker_url.is_empty();
+    // Propagate DB errors as 500 — previously these used `.ok().flatten()`,
+    // silently returning pending_intake=0 / null last_worker_intake during a DB
+    // outage (indistinguishable from "no pending intake").
     let pending: Option<(i64,)> = sqlx::query_as("SELECT COUNT(*) FROM intake_submissions WHERE status='new'")
-        .fetch_optional(&state.db).await.ok().flatten();
+        .fetch_optional(&state.db).await?;
     let last_sync: Option<(String,)> = sqlx::query_as("SELECT created_at FROM intake_submissions WHERE source='worker-sync' ORDER BY created_at DESC LIMIT 1")
-        .fetch_optional(&state.db).await.ok().flatten();
-    axum::Json(serde_json::json!({
+        .fetch_optional(&state.db).await?;
+    Ok(axum::Json(serde_json::json!({
         "configured": configured,
         "worker_url": worker_url,
         "sync_interval_secs": 30,
         "pending_intake": pending.map(|(c,)| c).unwrap_or(0),
         "last_worker_intake": last_sync.map(|(s,)| s),
-    }))
+    })))
 }
 
 async fn sync_now(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::Json<serde_json::Value> {
-    match sync::run_sync_cycle(&state).await {
-        Ok(_) => axum::Json(serde_json::json!({"ok": true, "message": "Sync cycle complete"})),
-        Err(e) => axum::Json(serde_json::json!({"ok": false, "error": e.to_string()})),
-    }
+) -> ApiResult<axum::Json<serde_json::Value>> {
+    // Propagate DB errors as 500 — previously this caught ALL errors and
+    // returned 200 with {"ok": false, "error": "..."}, masking DB outages.
+    sync::run_sync_cycle(&state).await?;
+    Ok(axum::Json(serde_json::json!({"ok": true, "message": "Sync cycle complete"})))
 }

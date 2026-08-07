@@ -177,7 +177,13 @@ pub async fn import_data(
                             _ => q.bind(v.to_string()),
                         };
                     }
-                    if q.execute(&mut *tx).await.is_ok() { imported += 1; }
+                    // Propagate real insert errors — previously `.is_ok()`
+                    // silently swallowed schema/type mismatches on individual
+                    // rows, reporting them as "imported" when they were dropped.
+                    // INSERT OR IGNORE still skips PK collisions (returns Ok,
+                    // rows_affected == 0) without being swallowed here.
+                    q.execute(&mut *tx).await?;
+                    imported += 1;
                 }
             }
         }
