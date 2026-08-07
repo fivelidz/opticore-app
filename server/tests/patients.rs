@@ -259,3 +259,88 @@ async fn create_patient_with_whitespace_only_name_is_rejected() {
         "whitespace-only names must be 400"
     );
 }
+
+// =====================================================================
+// Patient update: empty / whitespace-only names must be rejected
+// =====================================================================
+//
+// `create` validates this at the handler; `update` previously did not, relying
+// solely on the DB CHECK constraint (migration 0015). The DB catches it, but
+// the error surfaced as an opaque "value violates a database check constraint"
+// 400. The handler now validates upfront for a clear, actionable message.
+
+#[tokio::test]
+async fn update_patient_with_empty_last_name_is_rejected() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    // Create a valid patient first.
+    let body = serde_json::json!({
+        "first_name": "Upd", "last_name": "Valid", "date_of_birth": "1990-01-01",
+    });
+    let r = app
+        .post("/api/patients")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let pid = body_json(r).await["id"].as_i64().unwrap();
+
+    // Try to update with an empty last name.
+    let upd = serde_json::json!({
+        "first_name": "Upd", "last_name": "", "date_of_birth": "1990-01-01",
+    });
+    let resp = app
+        .put(&format!("/api/patients/{pid}"))
+        .auth(&t)
+        .json(&upd)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "updating a patient with an empty last_name must be 400"
+    );
+    // The error message should be actionable (mention first_name/last_name),
+    // not the opaque DB constraint message.
+    let v = body_json(resp).await;
+    let err = v["error"].as_str().unwrap();
+    assert!(
+        err.contains("first_name") || err.contains("last_name"),
+        "error should mention the field name, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn update_patient_with_whitespace_first_name_is_rejected() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let body = serde_json::json!({
+        "first_name": "Upd2", "last_name": "Valid", "date_of_birth": "1990-01-01",
+    });
+    let r = app
+        .post("/api/patients")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let pid = body_json(r).await["id"].as_i64().unwrap();
+
+    let upd = serde_json::json!({
+        "first_name": "   ", "last_name": "Valid", "date_of_birth": "1990-01-01",
+    });
+    let resp = app
+        .put(&format!("/api/patients/{pid}"))
+        .auth(&t)
+        .json(&upd)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "updating a patient with whitespace-only first_name must be 400"
+    );
+}

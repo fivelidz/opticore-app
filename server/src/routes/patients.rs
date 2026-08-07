@@ -145,6 +145,15 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(body): Json<UpdatePatient>,
 ) -> ApiResult<Json<Patient>> {
+    // Same empty-name validation as `create`: the DB has a CHECK constraint
+    // (migration 0015) that catches this, but without a handler check the
+    // error surfaces as an opaque "value violates a database check constraint"
+    // 400. Validate upfront for a clear, actionable message.
+    if body.first_name.trim().is_empty() || body.last_name.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "first_name and last_name must not be empty".into(),
+        ));
+    }
     sqlx::query(
         "UPDATE patients SET first_name = ?, last_name = ?, date_of_birth = ?, gender = ?,
             phone = ?, email = ?, address = ?, medicare_number = ?, updated_at = CURRENT_TIMESTAMP
