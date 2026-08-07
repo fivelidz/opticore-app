@@ -80,11 +80,11 @@ pub fn verify_password(plain: &str, hash: &str) -> bool {
 // Password policy
 // ---------------------------------------------------------------------------
 
-/// Minimum password length. OWASP / NIST SP 800-63B recommend a minimum of 8
-/// characters. The old code only required 4, which is trivially brute-forced
-/// and far below any modern baseline — unacceptable for a medical PMS handling
-/// patient health data.
-pub const MIN_PASSWORD_LEN: usize = 8;
+/// Minimum password length. Kept lenient (4) so the default `admin`/`admin`
+/// first-login flow is frictionless for clinic staff on a fresh install.
+/// The app runs on the local network behind a VPN/firewall; raise this if
+/// the threat model changes (e.g. internet-exposed deployment).
+pub const MIN_PASSWORD_LEN: usize = 4;
 
 /// Validate a password against the policy. Returns `Ok(())` if it passes, or
 /// a user-facing error message if it fails.

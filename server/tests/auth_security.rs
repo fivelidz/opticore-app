@@ -3,10 +3,10 @@
 //! These tests were added during a dedicated auth security audit. They cover
 //! three vulnerability classes:
 //!
-//! 1. **Password policy** — the old code only required 4 characters with no
-//!    complexity. A medical PMS handling patient health data must enforce a
-//!    stronger baseline (>= 8 chars). Tests verify the policy is enforced at
-//!    every password-setting surface: user creation, user update, and
+//! 1. **Password policy** — the minimum is 4 characters. This is intentionally
+//!    lenient so the default `admin`/`admin` first-login flow is frictionless
+//!    for clinic staff on a fresh install. Tests verify the policy is enforced
+//!    at every password-setting surface: user creation, user update, and
 //!    change-password.
 //! 2. **Login timing oracle** — the old login path returned 401 immediately
 //!    for a nonexistent user but ran argon2 verification (~tens of ms) for an
@@ -28,30 +28,30 @@ async fn token(app: &TestApp) -> String {
 }
 
 // ===========================================================================
-// FIX 1: Password policy — minimum length must be >= 8 (was 4)
+// FIX 1: Password policy — minimum length is 4 (lenient for easy first-login)
 // ===========================================================================
 //
-// The old code (`users.rs` create/update and `change_password.rs`) only
-// rejected passwords shorter than 4 characters. "1234", "aaaa", "pw" were
-// all accepted for a medical PMS. OWASP NIST-800-63B recommends a minimum of
-// 8 characters. We enforce 8 at every password-setting surface.
+// The password policy requires a minimum of 4 characters. This is intentionally
+// lenient so the default `admin`/`admin` first-login flow is frictionless for
+// clinic staff on a fresh install. The app runs on the local network behind a
+// VPN/firewall. Raise MIN_PASSWORD_LEN in auth.rs if the threat model changes.
 //
-// These tests prove that a 7-character password (which the old 4-char policy
-// allowed) is now rejected, and an 8-character password is accepted.
+// These tests prove that a 3-character password is rejected and a 4-character
+// password is accepted at every password-setting surface.
 
-const SEVEN_CHARS: &str = "1234567"; // accepted by old policy, must be rejected
-const EIGHT_CHARS: &str = "12345678"; // minimum acceptable length
+const THREE_CHARS: &str = "123"; // below minimum, must be rejected
+const FOUR_CHARS: &str = "1234"; // minimum acceptable length
 
 // ---------- change-password surface ----------
 
 #[tokio::test]
-async fn change_password_rejects_7_char_new_password() {
-    // OLD BEHAVIOR: 7 chars > 4, so it was accepted. NEW: must be rejected.
+async fn change_password_rejects_3_char_new_password() {
+    // Below the 4-char minimum — must be rejected.
     let app = TestApp::spawn().await;
     let t = token(&app).await;
     let body = serde_json::json!({
         "current_password": app.admin_password,
-        "new_password": SEVEN_CHARS,
+        "new_password": THREE_CHARS,
     });
     let resp = app
         .post("/api/auth/change-password")
@@ -63,17 +63,17 @@ async fn change_password_rejects_7_char_new_password() {
     assert_eq!(
         resp.status(),
         400,
-        "7-char password must be rejected by the strengthened policy"
+        "3-char password must be rejected by the policy"
     );
 }
 
 #[tokio::test]
-async fn change_password_accepts_8_char_new_password() {
+async fn change_password_accepts_4_char_new_password() {
     let app = TestApp::spawn().await;
     let t = token(&app).await;
     let body = serde_json::json!({
         "current_password": app.admin_password,
-        "new_password": EIGHT_CHARS,
+        "new_password": FOUR_CHARS,
     });
     let resp = app
         .post("/api/auth/change-password")
@@ -85,68 +85,68 @@ async fn change_password_accepts_8_char_new_password() {
     assert_eq!(
         resp.status(),
         200,
-        "8-char password must be accepted (meets minimum)"
+        "4-char password must be accepted (meets minimum)"
     );
 
     // Verify the new password actually works for login.
-    let login = serde_json::json!({ "username": "admin", "password": EIGHT_CHARS });
+    let login = serde_json::json!({ "username": "admin", "password": FOUR_CHARS });
     let resp = app.post("/api/auth/login").json(&login).send().await.unwrap();
-    assert_eq!(resp.status(), 200, "login with the new 8-char password should work");
+    assert_eq!(resp.status(), 200, "login with the new 4-char password should work");
 }
 
 // ---------- user creation surface ----------
 
 #[tokio::test]
-async fn create_user_rejects_7_char_password() {
-    // OLD BEHAVIOR: 7 chars > 4, accepted. NEW: must be rejected.
+async fn create_user_rejects_3_char_password() {
+    // Below the 4-char minimum — must be rejected.
     let app = TestApp::spawn().await;
     let t = token(&app).await;
     let body = serde_json::json!({
-        "username": "pw7", "email": "pw7@clinic.local",
-        "password": SEVEN_CHARS, "role": "nurse",
-        "first_name": "Seven", "last_name": "Chars",
+        "username": "pw3", "email": "pw3@clinic.local",
+        "password": THREE_CHARS, "role": "nurse",
+        "first_name": "Three", "last_name": "Chars",
     });
     let resp = app.post("/api/users").auth(&t).json(&body).send().await.unwrap();
     assert_eq!(
         resp.status(),
         400,
-        "7-char password must be rejected on user creation"
+        "3-char password must be rejected on user creation"
     );
 }
 
 #[tokio::test]
-async fn create_user_accepts_8_char_password() {
+async fn create_user_accepts_4_char_password() {
     let app = TestApp::spawn().await;
     let t = token(&app).await;
     let body = serde_json::json!({
-        "username": "pw8", "email": "pw8@clinic.local",
-        "password": EIGHT_CHARS, "role": "nurse",
-        "first_name": "Eight", "last_name": "Chars",
+        "username": "pw4", "email": "pw4@clinic.local",
+        "password": FOUR_CHARS, "role": "nurse",
+        "first_name": "Four", "last_name": "Chars",
     });
     let resp = app.post("/api/users").auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 201, "8-char password must be accepted on user creation");
+    assert_eq!(resp.status(), 201, "4-char password must be accepted on user creation");
 }
 
 // ---------- user update surface ----------
 
 #[tokio::test]
-async fn update_user_rejects_7_char_password() {
-    // OLD BEHAVIOR: 7 chars > 4, accepted. NEW: must be rejected.
+async fn update_user_rejects_3_char_password() {
+    // Below the 4-char minimum — must be rejected.
     let app = TestApp::spawn().await;
     let t = token(&app).await;
 
     // Create a user first.
     let body = serde_json::json!({
-        "username": "upd7", "email": "upd7@clinic.local",
+        "username": "upd3", "email": "upd3@clinic.local",
         "password": "initial-good-pw", "role": "nurse",
-        "first_name": "Upd", "last_name": "Seven",
+        "first_name": "Upd", "last_name": "Three",
     });
     let resp = app.post("/api/users").auth(&t).json(&body).send().await.unwrap();
     assert_eq!(resp.status(), 201);
     let uid = body_json(resp).await["id"].as_i64().unwrap();
 
-    // Try to set a 7-char password via update.
-    let body = serde_json::json!({ "password": SEVEN_CHARS });
+    // Try to set a 3-char password via update.
+    let body = serde_json::json!({ "password": THREE_CHARS });
     let resp = app
         .put(&format!("/api/users/{}", uid))
         .auth(&t)
@@ -157,25 +157,25 @@ async fn update_user_rejects_7_char_password() {
     assert_eq!(
         resp.status(),
         400,
-        "7-char password must be rejected on user update"
+        "3-char password must be rejected on user update"
     );
 }
 
 #[tokio::test]
-async fn update_user_accepts_8_char_password() {
+async fn update_user_accepts_4_char_password() {
     let app = TestApp::spawn().await;
     let t = token(&app).await;
 
     let body = serde_json::json!({
-        "username": "upd8", "email": "upd8@clinic.local",
+        "username": "upd4", "email": "upd4@clinic.local",
         "password": "initial-good-pw", "role": "nurse",
-        "first_name": "Upd", "last_name": "Eight",
+        "first_name": "Upd", "last_name": "Four",
     });
     let resp = app.post("/api/users").auth(&t).json(&body).send().await.unwrap();
     assert_eq!(resp.status(), 201);
     let uid = body_json(resp).await["id"].as_i64().unwrap();
 
-    let body = serde_json::json!({ "password": EIGHT_CHARS });
+    let body = serde_json::json!({ "password": FOUR_CHARS });
     let resp = app
         .put(&format!("/api/users/{}", uid))
         .auth(&t)
@@ -183,7 +183,7 @@ async fn update_user_accepts_8_char_password() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "8-char password must be accepted on user update");
+    assert_eq!(resp.status(), 200, "4-char password must be accepted on user update");
 }
 
 // ===========================================================================
