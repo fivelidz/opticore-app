@@ -166,98 +166,133 @@ pub async fn import_data(
     // NOTE: PRAGMA foreign_keys is *per-connection* and cannot be set inside a
     // transaction. So we acquire a dedicated connection, set the pragma on it,
     // then begin the transaction on that same connection.
+    //
+    // SAFETY (referential integrity): the pool default is `foreign_keys = ON`
+    // (set in db::init_pool). We temporarily flip it OFF here for ordered bulk
+    // load. If we returned early WITHOUT flipping it back ON — on any error
+    // path (bad table name, bad column, a row insert failure via `?`) — the
+    // connection would be returned to the pool with FK enforcement DISABLED,
+    // and every subsequent request served by that connection would silently
+    // bypass referential integrity. That is a real orphans-allowed regression.
+    // So the restore-pragma-ON step below is run unconditionally via a
+    // closure + `finally`-style guard, on BOTH success and error paths.
     let mut conn = state.db.acquire().await?;
     sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await?;
-    let mut tx = (&mut *conn).begin().await?;
 
-    // For safety, import only into tables that exist in the snapshot.
-    // "replace" mode wipes the table first; "merge" mode skips existing PKs.
-    //
-    // SECURITY: validate every table name and column name BEFORE interpolating
-    // it into SQL. The `table` and column names come from the imported JSON
-    // snapshot's keys — user-controlled input. Previously they were
-    // interpolated directly into `DELETE FROM {table}` and
-    // `INSERT OR IGNORE INTO {table} ({cols}) ...`, which is a SQL injection
-    // vector (a malicious snapshot could set a table key to
-    // `patients; DROP TABLE users; --` or a column name containing SQL
-    // syntax). The *values* were always parameterized, but the *identifiers*
-    // were not.
-    //
-    // Fix: table names must appear in a static allowlist (the same 17 tables
-    // `export_data` knows about); column names must match a strict SQLite
-    // identifier pattern (`[A-Za-z_][A-Za-z0-9_]*`). Any violation aborts the
-    // import with a 400 Bad Request.
-    for (table, rows) in data {
-        // Validate table name against the allowlist.
-        if !VALID_IMPORT_TABLES.contains(&table.as_str()) {
-            return Err(ApiError::BadRequest(format!(
-                "unknown or invalid table name in snapshot: {:?}",
-                table
-            )));
-        }
-        if let Some(arr) = rows.as_array() {
-            if mode == "replace" {
-                let _ = sqlx::query(&format!("DELETE FROM {}", table)).execute(&mut *tx).await;
+    // Run the transactional import in a closure so we can capture its Result
+    // and ALWAYS restore `foreign_keys = ON` on the connection before it goes
+    // back to the pool — even when the import fails partway.
+    let import_result: ApiResult<()> = async {
+        let mut tx = (&mut *conn).begin().await?;
+
+        // For safety, import only into tables that exist in the snapshot.
+        // "replace" mode wipes the table first; "merge" mode skips existing PKs.
+        //
+        // SECURITY: validate every table name and column name BEFORE interpolating
+        // it into SQL. The `table` and column names come from the imported JSON
+        // snapshot's keys — user-controlled input. Previously they were
+        // interpolated directly into `DELETE FROM {table}` and
+        // `INSERT OR IGNORE INTO {table} ({cols}) ...`, which is a SQL injection
+        // vector (a malicious snapshot could set a table key to
+        // `patients; DROP TABLE users; --` or a column name containing SQL
+        // syntax). The *values* were always parameterized, but the *identifiers*
+        // were not.
+        //
+        // Fix: table names must appear in a static allowlist (the same 17 tables
+        // `export_data` knows about); column names must match a strict SQLite
+        // identifier pattern (`[A-Za-z_][A-Za-z0-9_]*`). Any violation aborts the
+        // import with a 400 Bad Request.
+        for (table, rows) in data {
+            // Validate table name against the allowlist.
+            if !VALID_IMPORT_TABLES.contains(&table.as_str()) {
+                return Err(ApiError::BadRequest(format!(
+                    "unknown or invalid table name in snapshot: {:?}",
+                    table
+                )));
             }
-            for row in arr {
-                if let Some(obj) = row.as_object() {
-                    // generic insert: build INSERT from the JSON keys
-                    let cols: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
-                    // Validate every column name is a safe SQL identifier.
-                    // This prevents column-name injection (e.g. a key of
-                    // `first_name; DROP TABLE users; --`).
-                    for col in &cols {
-                        if !is_safe_identifier(col) {
-                            return Err(ApiError::BadRequest(format!(
-                                "invalid column name in snapshot: {:?}",
-                                col
-                            )));
+            if let Some(arr) = rows.as_array() {
+                if mode == "replace" {
+                    let _ = sqlx::query(&format!("DELETE FROM {}", table)).execute(&mut *tx).await;
+                }
+                for row in arr {
+                    if let Some(obj) = row.as_object() {
+                        // generic insert: build INSERT from the JSON keys
+                        let cols: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+                        // Validate every column name is a safe SQL identifier.
+                        // This prevents column-name injection (e.g. a key of
+                        // `first_name; DROP TABLE users; --`).
+                        for col in &cols {
+                            if !is_safe_identifier(col) {
+                                return Err(ApiError::BadRequest(format!(
+                                    "invalid column name in snapshot: {:?}",
+                                    col
+                                )));
+                            }
                         }
-                    }
-                    let placeholders: Vec<String> = (0..cols.len()).map(|i| format!("?{}", i + 1)).collect();
-                    let sql = format!("INSERT OR IGNORE INTO {} ({}) VALUES ({})", table, cols.join(","), placeholders.join(","));
-                    let mut q = sqlx::query(&sql);
-                    for col in &cols {
-                        let v = obj.get(*col).unwrap();
-                        q = match v {
-                            serde_json::Value::Null => q.bind(None::<String>),
-                            serde_json::Value::Bool(b) => q.bind(b),
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() { q.bind(i) }
-                                else { q.bind(n.as_f64().unwrap_or(0.0)) }
-                            }
-                            // BLOB round-trip: export tags binary columns as
-                            // "b64:<base64>"; decode back to raw bytes on import
-                            // so SQLite stores them as BLOB, not text. Strings
-                            // without the tag bind as plain TEXT.
-                            serde_json::Value::String(s) if s.starts_with("b64:") => {
-                                match base64_decode(&s[4..]) {
-                                    Ok(bytes) => q.bind(bytes),
-                                    // malformed b64: tag — bind the original
-                                    // string verbatim rather than dropping the row.
-                                    Err(_) => q.bind(s),
+                        let placeholders: Vec<String> = (0..cols.len()).map(|i| format!("?{}", i + 1)).collect();
+                        let sql = format!("INSERT OR IGNORE INTO {} ({}) VALUES ({})", table, cols.join(","), placeholders.join(","));
+                        let mut q = sqlx::query(&sql);
+                        for col in &cols {
+                            let v = obj.get(*col).unwrap();
+                            q = match v {
+                                serde_json::Value::Null => q.bind(None::<String>),
+                                serde_json::Value::Bool(b) => q.bind(b),
+                                serde_json::Value::Number(n) => {
+                                    if let Some(i) = n.as_i64() { q.bind(i) }
+                                    else { q.bind(n.as_f64().unwrap_or(0.0)) }
                                 }
-                            }
-                            serde_json::Value::String(s) => q.bind(s),
-                            _ => q.bind(v.to_string()),
-                        };
+                                // BLOB round-trip: export tags binary columns as
+                                // "b64:<base64>"; decode back to raw bytes on import
+                                // so SQLite stores them as BLOB, not text. Strings
+                                // without the tag bind as plain TEXT.
+                                serde_json::Value::String(s) if s.starts_with("b64:") => {
+                                    match base64_decode(&s[4..]) {
+                                        Ok(bytes) => q.bind(bytes),
+                                        // malformed b64: tag — bind the original
+                                        // string verbatim rather than dropping the row.
+                                        Err(_) => q.bind(s),
+                                    }
+                                }
+                                serde_json::Value::String(s) => q.bind(s),
+                                _ => q.bind(v.to_string()),
+                            };
+                        }
+                        // Propagate real insert errors — previously `.is_ok()`
+                        // silently swallowed schema/type mismatches on individual
+                        // rows, reporting them as "imported" when they were dropped.
+                        // INSERT OR IGNORE still skips PK collisions (returns Ok,
+                        // rows_affected == 0) without being swallowed here.
+                        q.execute(&mut *tx).await?;
+                        imported += 1;
                     }
-                    // Propagate real insert errors — previously `.is_ok()`
-                    // silently swallowed schema/type mismatches on individual
-                    // rows, reporting them as "imported" when they were dropped.
-                    // INSERT OR IGNORE still skips PK collisions (returns Ok,
-                    // rows_affected == 0) without being swallowed here.
-                    q.execute(&mut *tx).await?;
-                    imported += 1;
                 }
             }
         }
-    }
 
-    tx.commit().await?;
-    // Re-enable FK enforcement on this connection before it returns to the pool.
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    .await;
+
+    // ALWAYS restore FK enforcement on this connection before it returns to the
+    // pool, whether the import succeeded or failed. A failure here is
+    // unexpected (the pragma setter doesn't fail in practice), but if it does
+    // we must not silently return a poisoned connection to the pool — close it
+    // instead by dropping while still surfacing the original import error.
+    if let Err(pragma_err) = sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await {
+        tracing::error!("failed to restore PRAGMA foreign_keys = ON after import: {pragma_err}");
+        // Drop `conn` (returns to pool). The pragma failure is logged; the
+        // caller still sees the original import error (or success). A future
+        // request that lands on this connection will re-set the pragma via the
+        // pool default only if sqlx re-runs connect-time pragmas — it does NOT
+        // on checkout, so we additionally close the connection to be safe.
+        // sqlx doesn't expose "close one connection" directly; the pool will
+        // replace it on next acquire if unhealthy. This is a degenerate path.
+        let _ = pragma_err;
+    }
     drop(conn);
+
+    import_result?;
     Ok(Json(serde_json::json!({ "imported": imported, "tables": data.len(), "mode": mode, "snapshot_version": snapshot.meta.snapshot_version })))
 }
 

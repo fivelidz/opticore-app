@@ -1,19 +1,45 @@
 //! Database pool, migrations, and first-boot admin provisioning.
 
 use anyhow::{anyhow, Result};
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    SqlitePool,
+};
 use tracing::{info, warn};
 
 pub async fn init_pool(url: &str) -> Result<SqlitePool> {
     // sqlx expects "sqlite://" for in-file; ensure mode=rwc so it's created.
-    let opts = if url.contains('?') {
+    let url = if url.contains('?') {
         url.to_string()
     } else {
         format!("{}?mode=rwc", url)
     };
+
+    // Build connect options from the URL and pin the pragmas we rely on.
+    //
+    // `foreign_keys = ON` is the most important: it makes SQLite actually
+    // enforce the `FOREIGN KEY ... ON DELETE CASCADE` declarations in the
+    // schema (appointments/invoices/clinical_notes → patients, invoice_items
+    // → invoices, payments → invoices). Without it, deleting a patient would
+    // silently orphan every dependent row — lost clinical/financial history.
+    //
+    // sqlx 0.8 enables `foreign_keys = ON` by default, but that is an
+    // implicit library default we should not depend on: a future sqlx
+    // upgrade, a different connection path, or a URL query param could
+    // silently flip it off. Setting it explicitly here makes the
+    // referential-integrity guarantee independent of sqlx's defaults and
+    // self-documenting. (The data_io import path still toggles it OFF
+    // per-connection for ordered bulk restore — that override still wins
+    // because it runs on the connection after this default is applied.)
+    //
+    // The URL carries `?mode=rwc` which already sets `create_if_missing`, so
+    // we don't set it again here.
+    let connect_opts: SqliteConnectOptions = url.parse()?;
+    let connect_opts = connect_opts.foreign_keys(true);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
-        .connect(&opts)
+        .connect_with(connect_opts)
         .await?;
     Ok(pool)
 }

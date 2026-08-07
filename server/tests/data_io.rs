@@ -142,8 +142,79 @@ async fn import_newer_snapshot_version_returns_400() {
     assert_eq!(resp.status(), 400);
 }
 
-// ---------- round-trip: export → import → equivalent state ----------
+// ---------- FK-pragma leak regression ----------
 
+/// Regression: a malformed import that fails AFTER the import path has set
+/// `PRAGMA foreign_keys = OFF` (e.g. an unknown table name in the snapshot,
+/// which is rejected by the allowlist check) must NOT leave the pooled
+/// connection with FK enforcement disabled.
+///
+/// Before the fix, the early `return Err(...)` dropped the connection back
+/// into the pool with `foreign_keys = OFF` still set, so the next request
+/// served by that connection would silently bypass referential integrity
+/// (orphaned invoices/appointments/clinical notes on patient delete, etc.).
+///
+/// This test triggers that early-return path and then asserts FK enforcement
+/// is still active on the pool afterwards by attempting a write that violates
+/// a foreign key — it must be rejected.
+#[tokio::test]
+async fn failed_import_does_not_leak_fk_off_into_pool() {
+    use sqlx::Row;
+
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+
+    // Craft a snapshot whose `data` contains a table name NOT in the import
+    // allowlist. This passes snapshot-version validation but is rejected by
+    // the per-table allowlist check — which runs AFTER `PRAGMA foreign_keys =
+    // OFF` has been set on the connection.
+    let bad = serde_json::json!({
+        "meta": { "snapshot_version": 1, "app_version": "x", "exported_at": "x", "table_count": 1, "row_count": 0, "encrypted": false },
+        "data": {
+            "definitely_not_a_real_table": []
+        }
+    });
+    let resp = app
+        .post("/api/data/import")
+        .auth(&t)
+        .json(&serde_json::json!({ "snapshot": bad.to_string() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "malformed-table import should be rejected");
+
+    // The import acquired a pooled connection, set FK OFF, then errored. That
+    // connection has now been returned to the pool. Force the pool to hand out
+    // connections (up to max_connections=8) and verify EACH one still enforces
+    // foreign keys — i.e. inserting a payment for a nonexistent invoice fails.
+    //
+    // We check multiple acquires because the poisoned connection could be any
+    // one of the pool's slots; checking several raises the chance we'd catch a
+    // leaked-FK-OFF connection if the bug regressed. (With max_connections=8
+    // and a single prior acquire, at most one slot is poisoned, so we acquire
+    // several times to maximize coverage.)
+    for _ in 0..8 {
+        let res = sqlx::query(
+            "INSERT INTO payments (invoice_id, amount, payment_method) \
+             VALUES (999999, 1.0, 'cash')",
+        )
+        .execute(&app.state.db)
+        .await;
+        assert!(
+            res.is_err(),
+            "FK enforcement must still be active after a failed import: \
+             a payment for a nonexistent invoice should be rejected. \
+             (This failing means a pooled connection has foreign_keys = OFF.)"
+        );
+    }
+
+    // Also directly confirm the pragma value on a fresh acquire.
+    let row = sqlx::query("PRAGMA foreign_keys").fetch_one(&app.state.db).await.unwrap();
+    let fk: i64 = row.get(0);
+    assert_eq!(fk, 1, "PRAGMA foreign_keys must be ON (1) on pooled connections");
+}
+
+// ---------- round-trip: export → import → equivalent state ----------
 #[tokio::test]
 async fn export_then_import_round_trips_row_counts() {
     // App A: source with seed data.
