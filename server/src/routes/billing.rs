@@ -232,6 +232,61 @@ pub async fn payments_by_invoice(State(state): State<AppState>, Path(inv): Path<
 }
 
 pub async fn add_payment(State(state): State<AppState>, Json(b): Json<CreatePayment>) -> ApiResult<Json<Payment>> {
+    // ---- Business-rule validation --------------------------------------
+    //
+    // Payments are financial transactions. Three classes of invalid input
+    // were previously accepted (or surfaced as opaque 500s):
+    //
+    //   1. Payment against a nonexistent invoice. The `payments` table has
+    //      an FK to `invoices`, so the INSERT violated the constraint and
+    //      sqlx returned a Database error → HTTP 500. Should be 404.
+    //
+    //   2. Non-positive payment amount (<= 0). A zero or negative payment
+    //      is nonsensical and, for negatives, would *decrease* amount_paid
+    //      via the `amount_paid + ?` UPDATE — silently creating credit
+    //      out of thin air. Must be 400.
+    //
+    //   3. Overpayment (amount > outstanding balance). The old SQL
+    //      `balance_due = MAX(0, total_amount - (amount_paid + ?))`
+    //      silently clamped the balance to 0, discarding the overpayment.
+    //      The payment row was recorded but the invoice showed no credit
+    //      owing — silent data loss for the practice. Conservative policy:
+    //      reject overpayment with 400. (A proper refund/credit-note
+    //      workflow is a separate feature.)
+    //
+    // All checks run BEFORE any INSERT so no dangling payment row is left
+    // behind on rejection.
+
+    // (1) amount must be a positive, finite number.
+    if !b.amount.is_finite() || b.amount <= 0.0 {
+        return Err(ApiError::BadRequest("payment amount must be a positive finite number".into()));
+    }
+
+    // (2) invoice must exist — and fetch its current balance in the same
+    //     query so we can check overpayment without a read-then-write race.
+    //     (The race window is small and the consequence of a concurrent
+    //     payment is merely that this payment is rejected as an overpay,
+    //     which is the safe failure mode.)
+    let row = sqlx::query("SELECT balance_due FROM invoices WHERE id = ?")
+        .bind(b.invoice_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let balance_due: f64 = row.get("balance_due");
+
+    // (3) reject overpayment (conservative policy — see note above).
+    //     Allow exact-balance payments (amount == balance_due) since that
+    //     is the normal "settle up" case; floating-point equality is safe
+    //     here because both values round-trip through the same SQLite REAL
+    //     column without further arithmetic.
+    if b.amount > balance_due {
+        return Err(ApiError::BadRequest(format!(
+            "payment amount {} exceeds outstanding balance {} (overpayment not allowed)",
+            b.amount, balance_due
+        )));
+    }
+
     let r = sqlx::query("INSERT INTO payments (invoice_id, amount, payment_method, reference_number, notes) VALUES (?, ?, ?, ?, ?)")
         .bind(b.invoice_id).bind(b.amount).bind(&b.payment_method).bind(&b.reference_number).bind(&b.notes)
         .execute(&state.db).await?;

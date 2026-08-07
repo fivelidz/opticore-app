@@ -220,3 +220,111 @@ async fn invoice_rejects_overflowing_totals() {
     let resp = app.post("/api/billing/invoices").auth(&t).json(&body).send().await.unwrap();
     assert_eq!(resp.status(), 400, "overflowing totals (Infinity) must be 400");
 }
+
+// =====================================================================
+// Payment validation
+// =====================================================================
+//
+// Business rules (documented in the fix commit):
+//   * amount must be > 0 and finite (reject zero, negative, NaN, Infinity)
+//   * invoice must exist (404 if not — previously surfaced as 500 from
+//     the FK constraint violation on INSERT)
+//   * amount must not exceed the outstanding balance (reject overpayment
+//     with 400 — conservative policy; previously the SQL MAX(0, ...)
+//     silently clamped balance_due to 0, discarding the overpayment)
+
+#[tokio::test]
+async fn payment_to_nonexistent_invoice_returns_404() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pay = serde_json::json!({
+        "invoice_id": 999999, "amount": 50.0, "payment_method": "card",
+    });
+    let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
+    assert_eq!(resp.status(), 404, "payment to nonexistent invoice must be 404");
+}
+
+#[tokio::test]
+async fn payment_rejects_negative_amount() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "NegPay").await;
+    let inv = create_invoice(&app, &t, pid, 1.0, 100.0).await;
+    let inv_id = inv["id"].as_i64().unwrap();
+    let pay = serde_json::json!({
+        "invoice_id": inv_id, "amount": -50.0, "payment_method": "card",
+    });
+    let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "negative payment must be 400");
+}
+
+#[tokio::test]
+async fn payment_rejects_zero_amount() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "ZeroPay").await;
+    let inv = create_invoice(&app, &t, pid, 1.0, 100.0).await;
+    let inv_id = inv["id"].as_i64().unwrap();
+    let pay = serde_json::json!({
+        "invoice_id": inv_id, "amount": 0.0, "payment_method": "card",
+    });
+    let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "zero payment must be 400");
+}
+
+#[tokio::test]
+async fn payment_rejects_overpayment() {
+    // Conservative policy: reject payments that exceed the outstanding
+    // balance. Previously the SQL `MAX(0, ...)` silently clamped the
+    // balance to 0, discarding the overpayment amount entirely (the
+    // payment row itself was recorded, but the invoice showed no credit /
+    // refund owing — a silent data-loss bug for the practice).
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "Overpay").await;
+    let inv = create_invoice(&app, &t, pid, 1.0, 100.0).await;
+    let inv_id = inv["id"].as_i64().unwrap();
+    let pay = serde_json::json!({
+        "invoice_id": inv_id, "amount": 150.0, "payment_method": "card",
+    });
+    let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "overpayment must be 400 (conservative policy)");
+
+    // Confirm no payment row was inserted (the fix must validate BEFORE insert).
+    let resp = app.get(&format!("/api/billing/payments/invoice/{}", inv_id)).auth(&t).send().await.unwrap();
+    let v = body_json(resp).await;
+    assert_eq!(v.as_array().unwrap().len(), 0, "no payment row should exist after rejected overpayment");
+}
+
+#[tokio::test]
+async fn payment_rejects_overpayment_on_second_partial_payment() {
+    // First partial payment is fine; second that would overpay must be rejected.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "Overpay2").await;
+    let inv = create_invoice(&app, &t, pid, 1.0, 100.0).await;
+    let inv_id = inv["id"].as_i64().unwrap();
+
+    // Pay 60 — OK (balance 40).
+    let pay = serde_json::json!({ "invoice_id": inv_id, "amount": 60.0, "payment_method": "card" });
+    let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Pay 50 — would overpay (60 + 50 > 100).
+    let pay = serde_json::json!({ "invoice_id": inv_id, "amount": 50.0, "payment_method": "card" });
+    let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "second payment overpaying the balance must be 400");
+}
+
+#[tokio::test]
+async fn payment_exact_balance_is_allowed() {
+    // Paying the exact remaining balance is the normal "settle up" case.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "ExactPay").await;
+    let inv = create_invoice(&app, &t, pid, 1.0, 100.0).await;
+    let inv_id = inv["id"].as_i64().unwrap();
+    let pay = serde_json::json!({ "invoice_id": inv_id, "amount": 100.0, "payment_method": "cash" });
+    let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
+    assert_eq!(resp.status(), 200, "exact-balance payment must be accepted");
+}
