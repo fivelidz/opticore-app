@@ -467,3 +467,298 @@ async fn link_message_to_existing_patient_succeeds() {
         "linking a message to an existing patient should succeed"
     );
 }
+
+// =====================================================================
+// IPL treatments: fluence_j_cm2 must be non-negative
+// =====================================================================
+//
+// fluence (energy fluence in J/cm²) is a physical quantity. A negative value
+// is meaningless and would corrupt treatment records / analytics. The column
+// is nullable (some records may not log it), but when provided it must be >= 0.
+
+#[tokio::test]
+async fn ipl_with_negative_fluence_is_rejected() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "IplNegFlu").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "treatment_date": "2099-06-01T10:00:00Z",
+        "session_number": 1,
+        "fluence_j_cm2": -5.0,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/ipl"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "IPL with negative fluence_j_cm2 must be 400"
+    );
+}
+
+#[tokio::test]
+async fn ipl_with_zero_fluence_is_accepted() {
+    // Zero fluence is borderline but not nonsensical (could represent a
+    // calibration / test fire). Must be accepted.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "IplZeroFlu").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "treatment_date": "2099-06-01T10:00:00Z",
+        "session_number": 1,
+        "fluence_j_cm2": 0.0,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/ipl"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "IPL with zero fluence should succeed");
+}
+
+#[tokio::test]
+async fn ipl_with_null_fluence_is_accepted() {
+    // Fluence is optional (nullable column). Omitting it must still work.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "IplNullFlu").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "treatment_date": "2099-06-01T10:00:00Z",
+        "session_number": 1,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/ipl"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "IPL with no fluence should succeed");
+}
+
+// =====================================================================
+// IPL treatments: number_of_pulses must be >= 1 when provided
+// =====================================================================
+
+#[tokio::test]
+async fn ipl_with_negative_pulses_is_rejected() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "IplNegPul").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "treatment_date": "2099-06-01T10:00:00Z",
+        "session_number": 1,
+        "number_of_pulses": -10,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/ipl"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "IPL with negative number_of_pulses must be 400"
+    );
+}
+
+#[tokio::test]
+async fn ipl_with_zero_pulses_is_rejected() {
+    // A treatment with zero pulses did not happen — nonsensical.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "IplZeroPul").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "treatment_date": "2099-06-01T10:00:00Z",
+        "session_number": 1,
+        "number_of_pulses": 0,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/ipl"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "IPL with zero number_of_pulses must be 400"
+    );
+}
+
+// =====================================================================
+// IPL treatments: treatment_date must be a valid date
+// =====================================================================
+
+#[tokio::test]
+async fn ipl_with_malformed_treatment_date_is_rejected() {
+    // normalize_dt returns the raw string on parse failure, so without a
+    // validation guard a garbage date like "not-a-date" was silently stored.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "IplBadDate").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "treatment_date": "not-a-date",
+        "session_number": 1,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/ipl"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "IPL with malformed treatment_date must be 400"
+    );
+}
+
+#[tokio::test]
+async fn ipl_with_past_treatment_date_is_accepted() {
+    // Unlike appointments, IPL treatment records are historical: staff record
+    // a treatment that already happened. Past dates must be accepted.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "IplPast").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "treatment_date": "2020-01-15T10:00:00Z",
+        "session_number": 1,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/ipl"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "IPL with a past treatment_date should succeed (historical record)"
+    );
+}
+
+// =====================================================================
+// OSDI: subscores must be non-negative when provided
+// =====================================================================
+
+#[tokio::test]
+async fn osdi_with_negative_subscore_is_rejected() {
+    // Subscores (ocular_symptoms, vision_function, environmental_triggers)
+    // are severity scores. A negative value is meaningless and would distort
+    // the total.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "OsdiNegSub").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "score_date": "2026-06-01",
+        "total_score": 10.0,
+        "ocular_symptoms": -5.0,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/osdi"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "OSDI with negative subscore must be 400"
+    );
+}
+
+#[tokio::test]
+async fn osdi_with_zero_subscore_is_accepted() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "OsdiZeroSub").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "score_date": "2026-06-01",
+        "total_score": 0.0,
+        "ocular_symptoms": 0.0,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/osdi"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "OSDI with zero subscore should succeed");
+}
+
+// =====================================================================
+// OSDI: score_date must be a valid date
+// =====================================================================
+
+#[tokio::test]
+async fn osdi_with_malformed_score_date_is_rejected() {
+    // Previously the raw score_date string was bound verbatim, so a garbage
+    // value like "garbage-date" was silently stored.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "OsdiBadDate").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "score_date": "garbage-date",
+        "total_score": 10.0,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/osdi"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "OSDI with malformed score_date must be 400"
+    );
+}
+
+#[tokio::test]
+async fn osdi_with_valid_score_date_is_normalized() {
+    // A valid RFC3339 date should be normalized to the SQLite-friendly format.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "OsdiNormDate").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "score_date": "2026-06-15T00:00:00Z",
+        "total_score": 10.0,
+    });
+    let resp = app
+        .post(&format!("/api/patients/{pid}/osdi"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "valid OSDI score_date should succeed");
+    let v = body_json(resp).await;
+    // Should be normalized to "2026-06-15 00:00:00", not the raw RFC3339.
+    assert_eq!(v["score_date"], "2026-06-15 00:00:00");
+}

@@ -2,6 +2,7 @@ use axum::{
     extract::{Path, State},
     Json,
 };
+use chrono::NaiveDate;
 use shared::{
     Allergy, ClinicalNote, CreateAllergy, CreateNote, CreateOsdi, CreateIpl, IplTreatment, OsdiScore,
 };
@@ -107,8 +108,38 @@ pub async fn add_osdi(State(state): State<AppState>, Json(b): Json<CreateOsdi>) 
             "total_score must be a non-negative number".into(),
         ));
     }
+    // Subscores (ocular_symptoms, vision_function, environmental_triggers) are
+    // also severity scores. A negative subscore is meaningless and would
+    // distort the total. Validate each provided subscore's lower bound.
+    for (label, val) in [
+        ("ocular_symptoms", b.ocular_symptoms),
+        ("vision_function", b.vision_function),
+        ("environmental_triggers", b.environmental_triggers),
+    ] {
+        if let Some(v) = val {
+            if v < 0.0 || v.is_nan() {
+                return Err(ApiError::BadRequest(format!(
+                    "{label} must be a non-negative number"
+                )));
+            }
+        }
+    }
+    // Normalize score_date so it is stored in a consistent format. Previously
+    // the raw string was bound verbatim, so a garbage value like "not-a-date"
+    // was silently stored. normalize_dt returns the input unchanged on parse
+    // failure, so we validate first: reject anything that doesn't parse as
+    // RFC3339 or YYYY-MM-DD.
+    if shared::parse_dt(&b.score_date).is_none()
+        && NaiveDate::parse_from_str(&b.score_date, "%Y-%m-%d").is_err()
+    {
+        return Err(ApiError::BadRequest(format!(
+            "score_date '{}' is not a valid date (expected RFC3339 or YYYY-MM-DD)",
+            b.score_date
+        )));
+    }
+    let dt = shared::normalize_dt(&b.score_date);
     let r = sqlx::query("INSERT INTO osdi_scores (patient_id, score_date, total_score, ocular_symptoms, vision_function, environmental_triggers) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(b.patient_id).bind(&b.score_date).bind(b.total_score)
+        .bind(b.patient_id).bind(&dt).bind(b.total_score)
         .bind(b.ocular_symptoms).bind(b.vision_function).bind(b.environmental_triggers)
         .execute(&state.db).await?;
     let id = r.last_insert_rowid();
@@ -140,6 +171,41 @@ pub async fn add_ipl(State(state): State<AppState>, Json(b): Json<CreateIpl>) ->
         return Err(ApiError::BadRequest(
             "session_number must be >= 1".into(),
         ));
+    }
+    // fluence_j_cm2 (energy fluence in J/cm²) must be non-negative. A negative
+    // energy value is physically meaningless and would corrupt treatment
+    // records / analytics. NaN is also rejected (Infinity cannot reach here
+    // via standard JSON, but we guard for defense-in-depth).
+    if let Some(f) = b.fluence_j_cm2 {
+        if f < 0.0 || f.is_nan() || f.is_infinite() {
+            return Err(ApiError::BadRequest(
+                "fluence_j_cm2 must be a non-negative finite number".into(),
+            ));
+        }
+    }
+    // number_of_pulses must be a positive integer when provided. Zero or
+    // negative pulses is nonsensical for a treatment record (a treatment with
+    // no pulses did not happen).
+    if let Some(p) = b.number_of_pulses {
+        if p < 1 {
+            return Err(ApiError::BadRequest(
+                "number_of_pulses must be >= 1".into(),
+            ));
+        }
+    }
+    // Validate treatment_date: normalize_dt returns the raw string verbatim on
+    // parse failure, so a garbage value like "not-a-date" would be silently
+    // stored. Reject anything that doesn't parse as RFC3339 or YYYY-MM-DD.
+    // (We do NOT reject past dates here — unlike appointments, IPL treatment
+    // records are historical: staff routinely record a treatment that already
+    // happened.)
+    if shared::parse_dt(&b.treatment_date).is_none()
+        && NaiveDate::parse_from_str(&b.treatment_date, "%Y-%m-%d").is_err()
+    {
+        return Err(ApiError::BadRequest(format!(
+            "treatment_date '{}' is not a valid date (expected RFC3339 or YYYY-MM-DD)",
+            b.treatment_date
+        )));
     }
     let dt = shared::normalize_dt(&b.treatment_date);
     let r = sqlx::query("INSERT INTO ipl_treatments (patient_id, treatment_date, session_number, fluence_j_cm2, number_of_pulses, operator_name, clinical_notes) VALUES (?, ?, ?, ?, ?, ?, ?)")
