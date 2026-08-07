@@ -444,18 +444,75 @@ pub async fn decline_intake(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Wrap the read-guard-write sequence in `BEGIN IMMEDIATE` with a status
+    // guard — same double-processing race fix as `approve_intake`,
+    // `intake::import_one`, and `intake::merge_into`.
+    //
+    // RACE FIX: previously the handler did
+    //   SELECT * FROM intake_submissions WHERE id = ?   -- (1) read
+    //   UPDATE intake_submissions SET status = 'declined' WHERE id = ?  -- (2)
+    //   queue_notification(...)                        -- (3) INSERT notification
+    //
+    // with NO transaction wrapping steps 1–3. Two concurrent `decline_intake`
+    // calls on the same id both SELECT the row, both see status='new', both
+    // run the UPDATE, and both queue a decline notification → the patient
+    // receives TWO decline messages. A concurrent `approve_intake` +
+    // `decline_intake` on the same id could also race: both read status='new',
+    // both proceed — one creates a patient+appointment, the other marks it
+    // declined, leaving the submission in an inconsistent state
+    // (status='declined' but matched_patient_id set).
+    //
+    // `BEGIN IMMEDIATE` acquires the SQLite write lock at transaction start
+    // and serializes writers. The second caller's status re-check sees the
+    // row already processed and is rejected with 409. (Matches the
+    // `approve_intake` / `import_one` pattern exactly.)
+    let mut conn = state.db.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    // Re-fetch the intake row inside the transaction and check its status.
     let row = sqlx::query("SELECT * FROM intake_submissions WHERE id = ?")
         .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+        .fetch_optional(&mut *conn)
+        .await?;
+    let row = match row {
+        Some(r) => r,
+        None => {
+            sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+            return Err(ApiError::NotFound);
+        }
+    };
     let info = row_to_intake_info(&row);
+
+    // Status guard: only 'new' submissions can be declined. If another
+    // concurrent call already processed (imported/approved/declined/archived)
+    // this submission, reject cleanly. (Without the transaction this would be
+    // a TOCTOU.) We read the status from the row we just fetched inside the
+    // transaction rather than re-binding, since `row_to_intake_info` does not
+    // capture status — re-query it explicitly.
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM intake_submissions WHERE id = ?")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if status.as_deref().unwrap_or("new") != "new" {
+        sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+        return Err(ApiError::Conflict(format!(
+            "intake submission {} has already been processed (status: {})",
+            id,
+            status.as_deref().unwrap_or("?")
+        )));
+    }
 
     sqlx::query("UPDATE intake_submissions SET status = 'declined' WHERE id = ?")
         .bind(id)
-        .execute(&state.db)
+        .execute(&mut *conn)
         .await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
 
+    // Queue the decline notification OUTSIDE the transaction. The status
+    // guard above guarantees only one decline call reaches this point per
+    // submission, so at most one notification is queued. (queue_notification
+    // does its own INSERT; running it after COMMIT avoids holding the write
+    // lock across the settings load + template fill.)
     let settings = load_settings(&state).await?;
     let queued = queue_notification(
         &state,
@@ -481,6 +538,11 @@ pub async fn send_pending(
 ) -> ApiResult<Json<serde_json::Value>> {
     let settings = load_settings(&state).await?;
 
+    // Snapshot the pending notification ids. We do NOT hold a transaction
+    // across the HTTP sends below (providers can be slow; holding the SQLite
+    // write lock across network I/O would block every other write in the app).
+    // Instead we claim each row individually before sending — see the
+    // per-row claim step inside the loop.
     let rows = sqlx::query(
         "SELECT * FROM booking_notifications WHERE status = 'pending' ORDER BY id ASC",
     )
@@ -494,6 +556,46 @@ pub async fn send_pending(
 
     for r in &rows {
         let n = row_to_notification(r);
+
+        // ---- TOCTOU race fix: claim the row before sending ----------------
+        //
+        // Two concurrent `send_pending` calls both snapshot the same pending
+        // rows (the SELECT above runs outside a transaction). Without a
+        // claim step, both would send each notification and both would
+        // UPDATE the row — the patient receives TWO emails/SMS.
+        //
+        // Claim atomically: flip status 'pending' -> 'sending' inside a
+        // `BEGIN IMMEDIATE` transaction. If `rows_affected() == 0`, another
+        // caller already claimed (or finalized) this row — skip it. The
+        // `status = 'pending'` predicate in the WHERE clause makes the
+        // claim conditional on the row still being pending, so only one
+        // caller can ever win the claim for a given row. (SQLite serializes
+        // writers via BEGIN IMMEDIATE, so the two UPDATEs cannot both see
+        // status='pending'.)
+        //
+        // We use an intermediate 'sending' status (the column is free-form
+        // VARCHAR with no CHECK constraint) so that a crash mid-send leaves
+        // the row visibly in-progress rather than silently re-sendable. A
+        // future retry pass can pick up 'sending' rows that are stale.
+        let mut conn = state.db.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let claim = sqlx::query(
+            "UPDATE booking_notifications SET status = 'sending' WHERE id = ? AND status = 'pending'",
+        )
+        .bind(n.id)
+        .execute(&mut *conn)
+        .await?;
+        let claimed = claim.rows_affected() == 1;
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn);
+
+        if !claimed {
+            // Another concurrent send_pending already claimed this row.
+            // It is responsible for delivering (or has already delivered) it.
+            continue;
+        }
+
+        // ---- deliver via the configured provider (no DB lock held) --------
         let (status, response): (&str, String) = match n.channel.as_str() {
             "email" => {
                 match settings.email_api_key.as_ref().filter(|k| !k.is_empty()) {
@@ -520,6 +622,11 @@ pub async fn send_pending(
             _ => skipped += 1,
         }
 
+        // ---- finalize: record the terminal status -------------------------
+        // A plain UPDATE suffices here — the row is already claimed as
+        // 'sending' by us, so no other caller will touch it. (Even if a
+        // future retry pass picked up stale 'sending' rows, the id-keyed
+        // UPDATE here is idempotent for our own row.)
         sqlx::query(
             "UPDATE booking_notifications
              SET status = ?, provider_response = ?,

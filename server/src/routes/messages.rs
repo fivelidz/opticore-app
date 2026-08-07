@@ -81,16 +81,39 @@ pub async fn link_patient(
     // `linked_patient_id` (it was added in 0005_messages.sql without one).
     // Without this check, linking a message to a nonexistent patient would
     // silently store a dangling reference. Verify the patient exists first.
+    //
+    // ---- TOCTOU race fix ----------------------------------------------
+    //
+    // Previously the EXISTS check and the UPDATE ran as separate statements
+    // with no transaction. A concurrent `DELETE FROM patients` could land in
+    // the window between the EXISTS check (returned true) and the UPDATE —
+    // the UPDATE would then succeed and store a dangling `linked_patient_id`
+    // pointing at a patient that no longer exists. Because the `messages`
+    // table has no FK on this column, nothing catches the orphan.
+    //
+    // Wrap the guard + UPDATE in `BEGIN IMMEDIATE`, which acquires the SQLite
+    // write lock at transaction start and serializes writers. Any concurrent
+    // patient DELETE either commits before our guard runs (EXISTS sees the
+    // row gone → we reject with 400) or waits until after our UPDATE commits.
+    // The key guarantee: no DELETE can slip into the gap between the guard
+    // and the UPDATE. (Matches the users.rs / billing.rs / patients.rs
+    // pattern. SQLite has no `SELECT ... FOR UPDATE`; `BEGIN IMMEDIATE` is
+    // the standard idiom for serializing writers.)
+    let mut conn = state.db.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM patients WHERE id = ?)")
         .bind(pid)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *conn)
         .await?;
     if !exists {
+        sqlx::query("ROLLBACK").execute(&mut *conn).await?;
         return Err(ApiError::BadRequest(
             "referenced patient does not exist".into(),
         ));
     }
     sqlx::query("UPDATE messages SET linked_patient_id = ? WHERE id = ?")
-        .bind(pid).bind(id).execute(&state.db).await?;
+        .bind(pid).bind(id).execute(&mut *conn).await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(Json(shared::MessageResponse { message: "Linked to patient".into() }))
 }
