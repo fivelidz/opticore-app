@@ -275,3 +275,102 @@ async fn calendar_requires_auth() {
     let app = TestApp::spawn().await;
     assert_eq!(app.get("/api/calendar/2020-01-01/2020-01-02").send().await.unwrap().status(), 401);
 }
+
+// ---------- Appointment duration validation (session 10) ----------
+
+#[tokio::test]
+async fn create_appointment_with_zero_duration_is_rejected() {
+    // A zero-minute appointment is nonsensical.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "ZeroDur").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "appointment_type": "Consultation",
+        "appointment_date": "2099-01-15T09:00:00Z",
+        "duration_minutes": 0,
+    });
+    let resp = app
+        .post("/api/appointments")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "zero duration appointment must be 400"
+    );
+}
+
+#[tokio::test]
+async fn create_appointment_with_negative_duration_is_rejected() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "NegDur").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "appointment_type": "Consultation",
+        "appointment_date": "2099-01-15T09:00:00Z",
+        "duration_minutes": -15,
+    });
+    let resp = app
+        .post("/api/appointments")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "negative duration appointment must be 400"
+    );
+}
+
+#[tokio::test]
+async fn update_appointment_with_zero_duration_is_rejected() {
+    // The update path must enforce the same rule.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "UpdZeroDur").await;
+    // Create a valid appointment first.
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "appointment_type": "Consultation",
+        "appointment_date": "2099-01-15T09:00:00Z",
+        "duration_minutes": 30,
+    });
+    let r = app
+        .post("/api/appointments")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let id = body_json(r).await["id"].as_i64().unwrap();
+
+    // Try to update to zero duration.
+    let upd = serde_json::json!({
+        "patient_id": pid,
+        "appointment_type": "Consultation",
+        "appointment_date": "2099-01-15T09:00:00Z",
+        "duration_minutes": 0,
+        "practitioner": null,
+        "status": "scheduled",
+        "notes": null,
+    });
+    let resp = app
+        .put(&format!("/api/appointments/{id}"))
+        .auth(&t)
+        .json(&upd)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "update to zero duration must be 400"
+    );
+}

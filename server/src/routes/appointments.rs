@@ -141,6 +141,13 @@ pub async fn create(
             "appointment_date cannot be in the past".into(),
         ));
     }
+    // A zero/negative duration is nonsensical (a 0-minute or negative-length
+    // appointment). Must be >= 1 minute.
+    if body.duration_minutes < 1 {
+        return Err(ApiError::BadRequest(
+            "duration_minutes must be >= 1".into(),
+        ));
+    }
     let dt = shared::normalize_dt(&body.appointment_date);
     let r = sqlx::query(
         "INSERT INTO appointments (patient_id, appointment_type, appointment_date, duration_minutes, practitioner, status, notes)
@@ -183,6 +190,12 @@ pub async fn update(
     if parsed < chrono::Utc::now() {
         return Err(ApiError::BadRequest(
             "appointment_date cannot be in the past".into(),
+        ));
+    }
+    // Same duration rule as `create`.
+    if body.duration_minutes < 1 {
+        return Err(ApiError::BadRequest(
+            "duration_minutes must be >= 1".into(),
         ));
     }
     let dt = shared::normalize_dt(&body.appointment_date);
