@@ -82,6 +82,31 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(b): Json<UpdateBookingSettings>,
 ) -> ApiResult<Json<BookingSettings>> {
+    // ---- Field-level validation -----------------------------------------
+    //
+    // booking_mode is an enum-like column ('automatic' | 'approval'); any
+    // other string would be silently stored and later break the booking
+    // flow's mode dispatch. Reject unknown modes early.
+    //
+    // reminder_hours_before is a lead-time in hours; a negative value is
+    // nonsensical (a reminder sent after the appointment). Zero is allowed
+    // (reminder at appointment time). NaN/Infinity are not possible here
+    // (the field is i64), so we only bound the lower end.
+    if let Some(ref mode) = b.booking_mode {
+        if !matches!(mode.as_str(), "automatic" | "approval") {
+            return Err(ApiError::BadRequest(
+                "booking_mode must be 'automatic' or 'approval'".into(),
+            ));
+        }
+    }
+    if let Some(hours) = b.reminder_hours_before {
+        if hours < 0 {
+            return Err(ApiError::BadRequest(
+                "reminder_hours_before must be >= 0".into(),
+            ));
+        }
+    }
+
     // Build a dynamic SET clause so only provided fields are touched.
     let mut sets: Vec<&str> = Vec::new();
     if b.booking_mode.is_some() { sets.push("booking_mode = ?"); }

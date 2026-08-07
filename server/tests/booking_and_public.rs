@@ -153,3 +153,88 @@ async fn public_endpoints_do_not_require_auth() {
     assert_eq!(app.get("/api/public/availability/3").send().await.unwrap().status(), 200);
     assert_eq!(app.get("/api/public/appointment-types").send().await.unwrap().status(), 200);
 }
+
+// ---------- Booking settings validation (session 10) ----------
+//
+// The PUT /api/booking-settings endpoint accepted any value for
+// booking_mode (not just "automatic"/"approval") and negative
+// reminder_hours_before (a negative reminder lead-time is nonsensical).
+// These tests lock down the hardened validation.
+
+#[tokio::test]
+async fn update_booking_settings_rejects_invalid_booking_mode() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let body = serde_json::json!({
+        "booking_mode": "nonsense-mode",
+    });
+    let resp = app
+        .put("/api/booking-settings")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "invalid booking_mode must be 400, not 200"
+    );
+}
+
+#[tokio::test]
+async fn update_booking_settings_rejects_negative_reminder_hours() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let body = serde_json::json!({
+        "reminder_hours_before": -5,
+    });
+    let resp = app
+        .put("/api/booking-settings")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "negative reminder_hours_before must be 400"
+    );
+}
+
+#[tokio::test]
+async fn update_booking_settings_accepts_zero_reminder_hours() {
+    // Zero is borderline but legitimate (reminder at appointment time).
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let body = serde_json::json!({
+        "reminder_hours_before": 0,
+    });
+    let resp = app
+        .put("/api/booking-settings")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "zero reminder_hours_before should succeed");
+}
+
+#[tokio::test]
+async fn update_booking_settings_accepts_valid_modes() {
+    // Both documented modes must remain accepted (regression guard).
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    for mode in ["automatic", "approval"] {
+        let body = serde_json::json!({ "booking_mode": mode });
+        let resp = app
+            .put("/api/booking-settings")
+            .auth(&t)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "booking_mode '{mode}' should be accepted");
+    }
+}
