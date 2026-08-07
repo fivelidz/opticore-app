@@ -139,10 +139,19 @@ async fn import_one(state: &AppState, id: i64) -> ApiResult<()> {
 
     let year = chrono::Utc::now().format("%Y");
     let mrn = format!("MOS-{}{:07}", year, rand::random::<u32>() % 1_000_000);
+    // `patients.date_of_birth` is NOT NULL, but the public intake form
+    // makes DOB optional (`CreateIntake.date_of_birth: Option<String>`).
+    // Previously the optional was bound directly, so a submission with no
+    // DOB triggered `NOT NULL constraint failed: patients.date_of_birth`
+    // and the whole import crashed with an opaque HTTP 500. Supply a
+    // sentinel "unknown" DOB so the patient row is always created; staff
+    // can correct it later. (Rejecting the import would leave the
+    // submission stuck in `new` forever.)
+    let dob = sub.date_of_birth.clone().filter(|d| !d.is_empty()).unwrap_or_else(|| "unknown".into());
     let pr = sqlx::query(
         "INSERT INTO patients (mrn, first_name, last_name, date_of_birth, phone, email, address, medicare_number)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(&mrn).bind(&sub.first_name).bind(&sub.last_name).bind(&sub.date_of_birth)
+        .bind(&mrn).bind(&sub.first_name).bind(&sub.last_name).bind(&dob)
         .bind(&sub.phone).bind(&sub.email).bind(&sub.address).bind(&sub.medicare_number)
         .execute(&state.db).await?;
     let pid = pr.last_insert_rowid();

@@ -166,6 +166,50 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<shared::MessageResponse>> {
+    // ---- Referential-integrity guard -----------------------------------
+    //
+    // The dependent tables (appointments, invoices, clinical_notes, etc.)
+    // declare `FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE
+    // CASCADE`, but SQLite does NOT enforce foreign keys unless
+    // `PRAGMA foreign_keys = ON` is set per-connection — and this app does
+    // not set it for normal request handling (only the data-import path
+    // toggles it). So a bare `DELETE FROM patients WHERE id = ?` would
+    // silently SUCCEED and leave every dependent row orphaned (pointing at
+    // a nonexistent patient_id): lost appointment history, broken joins,
+    // dangling invoices/payments/clinical notes.
+    //
+    // For a medical PMS, silently orphaning clinical/financial history is
+    // dangerous. The conservative fix: REFUSE the deletion (409) when any
+    // dependent record exists, and tell the caller which tables block it.
+    // A proper hard-delete / anonymize / merge workflow is a separate
+    // feature; until then we never destroy a patient that has history.
+    //
+    // We check the tables that represent real patient history. (Photos and
+    // messages are intentionally omitted: photos can be re-uploaded and
+    // messages are an inbox, not a clinical record.)
+    let blockers: [(&str, &str); 5] = [
+        ("appointments",  "SELECT COUNT(*) FROM appointments WHERE patient_id = ?"),
+        ("invoices",      "SELECT COUNT(*) FROM invoices WHERE patient_id = ?"),
+        ("clinical_notes","SELECT COUNT(*) FROM clinical_notes WHERE patient_id = ?"),
+        ("allergies",     "SELECT COUNT(*) FROM allergies WHERE patient_id = ?"),
+        ("osdi_scores",   "SELECT COUNT(*) FROM osdi_scores WHERE patient_id = ?"),
+    ];
+    let mut blocking_tables = Vec::new();
+    for (name, sql) in &blockers {
+        let n: i64 = sqlx::query_scalar(sql).bind(id).fetch_one(&state.db).await?;
+        if n > 0 {
+            blocking_tables.push(*name);
+        }
+    }
+    if !blocking_tables.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "cannot delete patient {}: dependent record(s) exist in [{}]; \
+             remove or reassign them first (a proper merge/anonymize workflow is TBD)",
+            id,
+            blocking_tables.join(", ")
+        )));
+    }
+
     let r = sqlx::query("DELETE FROM patients WHERE id = ?")
         .bind(id)
         .execute(&state.db)
