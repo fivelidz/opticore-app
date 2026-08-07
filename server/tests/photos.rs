@@ -34,7 +34,8 @@ async fn create_patient(app: &TestApp, t: &str) -> i64 {
 async fn create_appointment(app: &TestApp, t: &str, pid: i64) -> i64 {
     let body = serde_json::json!({
         "patient_id": pid,
-        "appointment_date": "2026-08-07 09:00:00",
+        // Valid future RFC3339 date (passes date validation).
+        "appointment_date": "2099-08-07T09:00:00Z",
         "appointment_type": "consultation",
         "duration_minutes": 30,
         "status": "scheduled",

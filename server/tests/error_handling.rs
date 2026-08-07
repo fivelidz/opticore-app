@@ -667,7 +667,9 @@ async fn appointments_create_returns_500_on_db_failure() {
         .auth(&t)
         .json(&serde_json::json!({
             "patient_id": 1, "appointment_type": "consult",
-            "appointment_date": "2026-01-01 09:00", "duration_minutes": 60,
+            // Use a valid future RFC3339 date so the request passes
+            // date validation and reaches the DB layer (which is killed).
+            "appointment_date": "2099-01-01T09:00:00Z", "duration_minutes": 60,
             "practitioner": "Dr X", "notes": null
         }))
         .send().await.expect("no panic");

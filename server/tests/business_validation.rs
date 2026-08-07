@@ -328,3 +328,95 @@ async fn payment_exact_balance_is_allowed() {
     let resp = app.post("/api/billing/payments").auth(&t).json(&pay).send().await.unwrap();
     assert_eq!(resp.status(), 200, "exact-balance payment must be accepted");
 }
+
+// =====================================================================
+// Appointment date validation
+// =====================================================================
+//
+// Business rules (documented in the fix commit):
+//   * appointment_date must parse as RFC3339 or "YYYY-MM-DD"
+//     (malformed -> 400; previously normalize_dt stored the raw string)
+//   * the parsed instant must not be in the past (past -> 400)
+//
+// We do NOT constrain far-future dates.
+
+#[tokio::test]
+async fn appointment_rejects_past_date() {
+    // A practice-management system should not allow booking appointments in
+    // the past. We use a clearly-past RFC3339 timestamp.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "PastAppt").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "appointment_type": "Consultation",
+        "appointment_date": "2000-01-01T09:00:00Z",
+        "duration_minutes": 30,
+        "practitioner": "Dr. Test",
+    });
+    let resp = app.post("/api/appointments").auth(&t).json(&body).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "past appointment date must be 400");
+}
+
+#[tokio::test]
+async fn appointment_allows_future_date() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "FutureAppt").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "appointment_type": "Consultation",
+        "appointment_date": "2099-06-15T09:00:00Z",
+        "duration_minutes": 30,
+        "practitioner": "Dr. Test",
+    });
+    let resp = app.post("/api/appointments").auth(&t).json(&body).send().await.unwrap();
+    assert_eq!(resp.status(), 201, "future appointment date must be accepted");
+}
+
+#[tokio::test]
+async fn appointment_rejects_malformed_date() {
+    // A garbage string that normalize_dt can't parse should be rejected,
+    // not silently stored verbatim.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "BadDate").await;
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "appointment_type": "Consultation",
+        "appointment_date": "not-a-date",
+        "duration_minutes": 30,
+    });
+    let resp = app.post("/api/appointments").auth(&t).json(&body).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "malformed appointment date must be 400");
+}
+
+#[tokio::test]
+async fn appointment_update_rejects_past_date() {
+    // Moving an existing appointment into the past via UPDATE should also
+    // be rejected.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "PastUpd").await;
+    // Create a valid future appointment first.
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "appointment_type": "Consultation",
+        "appointment_date": "2099-06-15T09:00:00Z",
+        "duration_minutes": 30,
+        "practitioner": "Dr. Test",
+    });
+    let r = app.post("/api/appointments").auth(&t).json(&body).send().await.unwrap();
+    let appt_id = body_json(r).await["id"].as_i64().unwrap();
+
+    // Now try to move it into the past.
+    let body = serde_json::json!({
+        "appointment_type": "Consultation",
+        "appointment_date": "2000-01-01T09:00:00Z",
+        "duration_minutes": 30,
+        "practitioner": "Dr. Test",
+        "status": "scheduled",
+    });
+    let resp = app.put(&format!("/api/appointments/{}", appt_id)).auth(&t).json(&body).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "updating to a past appointment date must be 400");
+}

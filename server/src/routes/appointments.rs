@@ -113,6 +113,34 @@ pub async fn create(
     State(state): State<AppState>,
     Json(body): Json<CreateAppointment>,
 ) -> ApiResult<axum::response::Response> {
+    // ---- Date validation ------------------------------------------------
+    //
+    // A practice-management system should not allow booking appointments in
+    // the past, nor should it store unparseable date strings. Previously
+    // `normalize_dt` returned the raw string verbatim on parse failure,
+    // so "not-a-date" was silently stored as the appointment_date — and
+    // any past date was accepted, letting users "book" appointments that
+    // could never be kept.
+    //
+    // Rules:
+    //   * appointment_date must parse as RFC3339 or "YYYY-MM-DD"
+    //     (malformed -> 400)
+    //   * the parsed instant must be >= now (past -> 400)
+    //
+    // We do NOT constrain far-future dates (booking a year ahead is
+    // legitimate) and we do NOT enforce business hours here (that belongs
+    // in a scheduling-conflict layer, not date validation).
+    let dt = shared::parse_dt(&body.appointment_date).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "appointment_date '{}' is not a valid date (expected RFC3339 or YYYY-MM-DD)",
+            body.appointment_date
+        ))
+    })?;
+    if dt < chrono::Utc::now() {
+        return Err(ApiError::BadRequest(
+            "appointment_date cannot be in the past".into(),
+        ));
+    }
     let dt = shared::normalize_dt(&body.appointment_date);
     let r = sqlx::query(
         "INSERT INTO appointments (patient_id, appointment_type, appointment_date, duration_minutes, practitioner, status, notes)
@@ -145,6 +173,18 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(body): Json<UpdateAppointment>,
 ) -> ApiResult<Json<Appointment>> {
+    // Same date validation as `create`: reject malformed and past dates.
+    let parsed = shared::parse_dt(&body.appointment_date).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "appointment_date '{}' is not a valid date (expected RFC3339 or YYYY-MM-DD)",
+            body.appointment_date
+        ))
+    })?;
+    if parsed < chrono::Utc::now() {
+        return Err(ApiError::BadRequest(
+            "appointment_date cannot be in the past".into(),
+        ));
+    }
     let dt = shared::normalize_dt(&body.appointment_date);
     sqlx::query(
         "UPDATE appointments SET appointment_type = ?, appointment_date = ?, duration_minutes = ?,

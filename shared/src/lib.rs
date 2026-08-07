@@ -218,6 +218,28 @@ pub struct HealthResponse {
     pub clinic: String,
 }
 
+/// Parse a flexible datetime string into a UTC `DateTime`.
+///
+/// Accepts:
+///   * RFC 3339 / ISO 8601 with offset (e.g. "2026-01-15T09:00:00Z")
+///   * bare date "YYYY-MM-DD" (interpreted as midnight UTC)
+///
+/// Returns `None` if neither format parses. This is the validation
+/// counterpart to `normalize_dt`: callers should use `parse_dt` when they
+/// need to reject malformed dates (rather than silently storing the raw
+/// string), and `normalize_dt` when they only need a storage-formatted
+/// string for a date that is already known-valid.
+pub fn parse_dt(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone;
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(chrono::Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
+    }
+    None
+}
+
 /// Convenience: parse a flexible datetime string to a normalized one.
 /// Accepts ISO 8601 or "YYYY-MM-DD HH:MM". Returns the input unchanged on failure.
 pub fn normalize_dt(s: &str) -> String {
