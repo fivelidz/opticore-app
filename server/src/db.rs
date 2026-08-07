@@ -32,10 +32,31 @@ pub async fn init_pool(url: &str) -> Result<SqlitePool> {
     // per-connection for ordered bulk restore — that override still wins
     // because it runs on the connection after this default is applied.)
     //
+    // `journal_mode = WAL` + `synchronous = NORMAL` + `busy_timeout = 5s`
+    // are essential for multi-device / multi-client concurrent access:
+    //
+    //   - WAL (Write-Ahead Logging) allows readers and a writer to coexist
+    //     without blocking each other. Under the default rollback-journal
+    //     mode, a write locks the entire database and concurrent reads (from
+    //     another device's request) fail with "database is locked". WAL lets
+    //     multiple LAN clients read while one writes — the common case for a
+    //     small clinic with several tablets/desktops hitting the same server.
+    //   - `synchronous = NORMAL` is the recommended companion to WAL: it's
+    //     nearly as safe as FULL (the WAL file is still fsync'd on checkpoint)
+    //     but dramatically faster, especially under concurrent write pressure.
+    //   - `busy_timeout = 5s` makes a connection that hits a lock WAIT up to
+    //     5 seconds before returning SQLITE_BUSY, instead of failing
+    //     instantly. This absorbs the brief contention windows that occur
+    //     when two requests try to write at the same instant.
+    //
     // The URL carries `?mode=rwc` which already sets `create_if_missing`, so
     // we don't set it again here.
     let connect_opts: SqliteConnectOptions = url.parse()?;
-    let connect_opts = connect_opts.foreign_keys(true);
+    let connect_opts = connect_opts
+        .foreign_keys(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)

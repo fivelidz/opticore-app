@@ -6,6 +6,10 @@ import axios from "axios";
 //   The Tauri webview serves pages via tauri:// or https://tauri.localhost,
 //   so we detect "not a normal http dev server" and point at localhost:3000.
 // - In Vite dev (http://localhost:5173), use empty baseURL (proxy handles it).
+// - When served by the axum server directly (LAN browser access from another
+//   device), use an empty baseURL so axios calls are relative — the browser
+//   targets the same host:port it loaded the page from. This lets a tablet
+//   open http://<clinic-server-IP>:3000/ and everything just works.
 const isTauriApp = typeof window !== "undefined" &&
   (window.location.protocol.startsWith("tauri") ||
    window.location.hostname === "tauri.localhost" ||
@@ -16,7 +20,7 @@ const isDevServer = typeof window !== "undefined" &&
 
 const baseURL =
   (import.meta as any).env?.VITE_API_URL ||
-  (isTauriApp ? "http://localhost:3000" : isDevServer ? "" : "http://localhost:3000");
+  (isTauriApp ? "http://localhost:3000" : isDevServer ? "" : "");
 
 export const api = axios.create({ baseURL: baseURL + "/api", timeout: 15000 });
 

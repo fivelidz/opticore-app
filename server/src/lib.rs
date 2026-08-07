@@ -216,10 +216,27 @@ pub async fn run() -> Result<()> {
     let static_showcase = tower_http::services::ServeFile::new("server/static/showcase.html");
     let static_online = tower_http::services::ServeFile::new("server/static/online-booking.html");
 
+    // Serve the built frontend SPA (frontend/dist/) so that other devices on
+    // the LAN can open the full PMS UI in a browser by navigating to
+    // http://<this-machine-IP>:3000/ — no Tauri desktop app needed.
+    //
+    // The ServeDir is a fallback: any request that doesn't match an /api/*
+    // route or a named static page falls through to the SPA. If the file
+    // exists (e.g. /assets/index.js) it's served; otherwise index.html is
+    // returned so client-side routing works (e.g. /patients/42).
+    //
+    // The path is configurable via FRONTEND_DIST (defaults to the repo-relative
+    // location). Not part of build_app so tests don't need the dist to exist.
+    let frontend_dist =
+        std::env::var("FRONTEND_DIST").unwrap_or_else(|_| "frontend/dist".to_string());
+    let spa = tower_http::services::ServeDir::new(&frontend_dist)
+        .fallback(tower_http::services::ServeFile::new(format!("{}/index.html", frontend_dist)));
+
     let app = build_app(state)
         .route_service("/input", static_input)
         .route_service("/showcase", static_showcase)
-        .route_service("/book", static_online);
+        .route_service("/book", static_online)
+        .fallback_service(spa);
 
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
