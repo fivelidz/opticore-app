@@ -56,13 +56,19 @@ pub async fn export_data(
     for table in &tables {
         // dynamic SELECT — sqlx needs a known query at compile time for query!,
         // so we use the unchecked variant for the export dump.
-        let rows: Result<Vec<sqlx::sqlite::SqliteRow>, _> = sqlx::query(&format!("SELECT * FROM {}", table))
-            .fetch_all(&state.db).await;
-        if let Ok(rows) = rows {
-            let arr: Vec<serde_json::Value> = rows.iter().map(|r| row_to_json(r)).collect();
-            total_rows += arr.len();
-            dump.insert(table.to_string(), serde_json::Value::Array(arr));
-        }
+        //
+        // BUGFIX: this previously did `if let Ok(rows) = rows { ... }`, silently
+        // discarding DB errors. A backup taken during a DB failure (pool closed,
+        // disk full, locked) would return a "successful" snapshot with zero rows
+        // — silent data loss. Now we propagate the error as a 500 so the caller
+        // knows the backup failed.
+        let rows: Vec<sqlx::sqlite::SqliteRow> =
+            sqlx::query(&format!("SELECT * FROM {}", table))
+                .fetch_all(&state.db)
+                .await?;
+        let arr: Vec<serde_json::Value> = rows.iter().map(|r| row_to_json(r)).collect();
+        total_rows += arr.len();
+        dump.insert(table.to_string(), serde_json::Value::Array(arr));
     }
 
     let snapshot = Snapshot {
