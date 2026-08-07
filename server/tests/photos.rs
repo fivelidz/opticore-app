@@ -298,3 +298,123 @@ async fn photos_endpoints_require_auth() {
         401
     );
 }
+
+// ---------- base64 validation on upload ----------
+
+/// Upload with invalid base64 must be rejected with 400 — not stored silently.
+///
+/// Before the fix, `insert_photo` stored `data_base64` verbatim with no
+/// validation. A client could upload `data_base64: "!!!not base64!!!"` and it
+/// would be persisted; any downstream consumer that decodes the stored value
+/// would get garbage or a decode error. This is silent data corruption.
+#[tokio::test]
+async fn upload_invalid_base64_returns_400() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t).await;
+    let mut body = upload_body("document");
+    body["data_base64"] = serde_json::json!("!!!not valid base64!!!");
+    let resp = app
+        .post(&format!("/api/patients/{pid}/photos"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "invalid base64 must be rejected, not stored");
+}
+
+/// Upload with empty base64 string must be rejected with 400.
+/// An empty photo is meaningless and would be stored as a zero-byte file.
+#[tokio::test]
+async fn upload_empty_base64_returns_400() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t).await;
+    let mut body = upload_body("document");
+    body["data_base64"] = serde_json::json!("");
+    let resp = app
+        .post(&format!("/api/patients/{pid}/photos"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "empty base64 must be rejected");
+}
+
+/// Upload with base64 that has invalid padding must be rejected with 400.
+#[tokio::test]
+async fn upload_base64_bad_padding_returns_400() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t).await;
+    let mut body = upload_body("document");
+    // "Zm9vYmFy" is valid for "foobar"; adding a stray char breaks it.
+    body["data_base64"] = serde_json::json!("Zm9vYmFy!@#$");
+    let resp = app
+        .post(&format!("/api/patients/{pid}/photos"))
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "base64 with illegal chars must be rejected");
+}
+
+// ---------- make-profile ownership validation ----------
+
+/// `make_profile` must reject a nonexistent photo id with 404.
+///
+/// Before the fix, `make_profile` ran `UPDATE patients SET profile_photo_id = ?`
+/// with no existence check. Setting it to id 999999 (nonexistent) succeeded
+/// silently, creating a dangling `profile_photo_id` pointer (the column has no
+/// FK constraint, so the DB doesn't reject it either).
+#[tokio::test]
+async fn make_profile_nonexistent_photo_returns_404() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t).await;
+    let resp = app
+        .post(&format!("/api/patients/{pid}/photos/999999/make-profile"))
+        .auth(&t)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "make-profile on nonexistent photo must 404");
+    // And the profile_photo_id must NOT have been set to the dangling id.
+    assert_eq!(profile_photo_id(&app, pid).await, None, "no dangling profile_photo_id");
+}
+
+/// `make_profile` must reject a photo that belongs to a DIFFERENT patient.
+///
+/// Before the fix, patient B could "claim" patient A's photo as their profile
+/// pic by id alone — a cross-patient data reference. The photo must belong to
+/// the patient in the URL.
+#[tokio::test]
+async fn make_profile_rejects_other_patients_photo() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let pid_a = create_patient(&app, &t).await;
+    let pid_b = create_patient(&app, &t).await;
+
+    // Upload a photo for patient A.
+    let resp = app
+        .post(&format!("/api/patients/{pid_a}/photos"))
+        .auth(&t)
+        .json(&upload_body("document"))
+        .send()
+        .await
+        .unwrap();
+    let photo_a = body_json(resp).await["id"].as_i64().unwrap();
+
+    // Patient B tries to claim A's photo.
+    let resp = app
+        .post(&format!("/api/patients/{pid_b}/photos/{photo_a}/make-profile"))
+        .auth(&t)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "make-profile must reject another patient's photo");
+    assert_eq!(profile_photo_id(&app, pid_b).await, None, "B must not reference A's photo");
+}
