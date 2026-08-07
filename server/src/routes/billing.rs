@@ -82,6 +82,45 @@ pub async fn invoices_by_patient(State(state): State<AppState>, Path(pid): Path<
 }
 
 pub async fn create_invoice(State(state): State<AppState>, Json(b): Json<CreateInvoice>) -> ApiResult<Json<Invoice>> {
+    // ---- Business-rule validation --------------------------------------
+    //
+    // An invoice represents a real financial obligation. Invalid line items
+    // can invert or zero-out the grand total, producing nonsense data that
+    // breaks every downstream report. We reject early (400) before any DB
+    // write so partial state is never persisted.
+    //
+    // Rules (conservative, documented):
+    //   * items must be non-empty (an invoice with no lines is meaningless)
+    //   * quantity    > 0            (zero/negative qty is nonsensical)
+    //   * unit_price  >= 0           (free items allowed; negative rejected)
+    //   * discount_percent in [0, 100] (>100% would invert the line total)
+    //   * tax_rate    in [0, 1]      (>100% tax is implausible)
+    //   * no NaN/Infinity inputs      (serde_json parses "NaN"/"Infinity"
+    //     as f64::NAN / f64::INFINITY for some clients; reject them)
+    if b.items.is_empty() {
+        return Err(ApiError::BadRequest("invoice must have at least one item".into()));
+    }
+    for (i, it) in b.items.iter().enumerate() {
+        if !it.quantity.is_finite() {
+            return Err(ApiError::BadRequest(format!("item {}: quantity must be a finite number", i)));
+        }
+        if !it.unit_price.is_finite() {
+            return Err(ApiError::BadRequest(format!("item {}: unit_price must be a finite number", i)));
+        }
+        if it.quantity <= 0.0 {
+            return Err(ApiError::BadRequest(format!("item {}: quantity must be > 0", i)));
+        }
+        if it.unit_price < 0.0 {
+            return Err(ApiError::BadRequest(format!("item {}: unit_price must be >= 0", i)));
+        }
+        if !(0.0..=100.0).contains(&it.discount_percent) {
+            return Err(ApiError::BadRequest(format!("item {}: discount_percent must be in [0, 100]", i)));
+        }
+        if !(0.0..=1.0).contains(&it.tax_rate) {
+            return Err(ApiError::BadRequest(format!("item {}: tax_rate must be in [0, 1]", i)));
+        }
+    }
+
     // compute totals
     let mut subtotal = 0.0f64;
     let mut tax = 0.0f64;
@@ -94,6 +133,16 @@ pub async fn create_invoice(State(state): State<AppState>, Json(b): Json<CreateI
         (it.item_type.clone(), it.description.clone(), it.quantity, it.unit_price, it.discount_percent, it.tax_rate, total)
     }).collect();
     let total_amount = subtotal + tax;
+
+    // Overflow / NaN / Infinity guard on the computed totals. Even with
+    // each individual input finite and in-range, summing many large line
+    // items can overflow f64 to +Infinity (e.g. two f64::MAX values).
+    // SQLite stores REAL as IEEE-754 double, so Inf/NaN *can* be persisted
+    // — but they break every downstream SUM/comparison and serialize as
+    // `null`/`Infinity` in JSON. Reject before any write.
+    if !subtotal.is_finite() || !tax.is_finite() || !total_amount.is_finite() {
+        return Err(ApiError::BadRequest("invoice total overflow (NaN/Infinity) — line items too large".into()));
+    }
 
     // Generate the invoice number and insert the invoice inside a single
     // `BEGIN IMMEDIATE` transaction.
