@@ -16,8 +16,21 @@ pub async fn login(
     )
     .bind(&req.username)
     .fetch_optional(&state.db)
-    .await?
-    .ok_or(ApiError::Unauthorized)?;
+    .await?;
+
+    // Timing-attack mitigation: when the user is not found, run a dummy
+    // argon2 verification so this path takes roughly the same time as the
+    // wrong-password path below. Without this, an attacker can enumerate
+    // valid usernames by measuring response time (a fast 401 = user doesn't
+    // exist; a slow 401 = user exists, argon2 ran). The dummy verify always
+    // fails — we only care about consuming comparable CPU time.
+    let row = match row {
+        Some(r) => r,
+        None => {
+            crate::auth::verify_password_dummy(&req.password);
+            return Err(ApiError::Unauthorized);
+        }
+    };
 
     let is_active: bool = row.try_get("is_active").map_err(ApiError::from)?;
     if !is_active {
