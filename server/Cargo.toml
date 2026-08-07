@@ -35,6 +35,11 @@ reqwest.workspace = true
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+# jsonwebtoken + chrono are regular deps; re-declared here so integration
+# tests can craft custom tokens (expired, wrong-key, etc.) for auth edge-case
+# coverage. Using the workspace dep avoids version skew.
+jsonwebtoken.workspace = true
+chrono.workspace = true
 
 [build-dependencies]
 # none
