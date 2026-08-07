@@ -160,6 +160,97 @@ async fn cannot_delete_last_admin() {
     assert_eq!(resp.status(), 400);
 }
 
+// ---------- last-active-admin invariant (structural) ----------
+//
+// The system requires at least one active admin to be loggable. `delete`
+// already guarded this; `toggle_active` and `update` (role-change /
+// is_active-change) did NOT — an admin could deactivate or demote themselves
+// and brick the system (no active admin left to recover it). These tests
+// characterize the now-guarded paths.
+
+/// Toggling the last active admin OFF must be refused (would brick login).
+#[tokio::test]
+async fn cannot_toggle_off_last_active_admin() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    // Seeded admin (id=1) is the only active admin.
+    let resp = app.post("/api/users/1/toggle").auth(&t).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "toggling off the last active admin should be rejected");
+    // Confirm the admin is still active (state unchanged).
+    let resp = app.get("/api/users").auth(&t).send().await.unwrap();
+    let v = body_json(resp).await;
+    let admin = v.as_array().unwrap().iter().find(|u| u["username"] == "admin").unwrap();
+    assert_eq!(admin["is_active"], true, "admin should still be active after rejected toggle");
+}
+
+/// Toggling a NON-last admin OFF is allowed (a second active admin remains).
+#[tokio::test]
+async fn can_toggle_off_admin_when_another_active_admin_exists() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    // Create a second admin.
+    let body = serde_json::json!({
+        "username": "admin2", "email": "a2@clinic.local",
+        "password": "secure123", "role": "admin",
+        "first_name": "Admin", "last_name": "Two",
+    });
+    let r = app.post("/api/users").auth(&t).json(&body).send().await.unwrap();
+    let id = body_json(r).await["id"].as_i64().unwrap();
+
+    // Now toggling the original admin OFF should succeed (admin2 remains).
+    let resp = app.post("/api/users/1/toggle").auth(&t).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// Demoting the last active admin via PUT (role: admin -> doctor) must be
+/// refused (would leave zero active admins).
+#[tokio::test]
+async fn cannot_demote_last_active_admin_via_update() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let body = serde_json::json!({ "role": "doctor" });
+    let resp = app.put("/api/users/1").auth(&t).json(&body).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "demoting the last active admin should be rejected");
+    // Confirm role unchanged.
+    let resp = app.get("/api/users").auth(&t).send().await.unwrap();
+    let v = body_json(resp).await;
+    let admin = v.as_array().unwrap().iter().find(|u| u["username"] == "admin").unwrap();
+    assert_eq!(admin["role"], "admin", "admin role should be unchanged after rejected demotion");
+}
+
+/// Deactivating the last active admin via PUT (is_active: false) must be
+/// refused.
+#[tokio::test]
+async fn cannot_deactivate_last_active_admin_via_update() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let body = serde_json::json!({ "is_active": false });
+    let resp = app.put("/api/users/1").auth(&t).json(&body).send().await.unwrap();
+    assert_eq!(resp.status(), 400, "deactivating the last active admin should be rejected");
+}
+
+/// Demoting a NON-last admin via PUT is allowed (a second active admin remains).
+#[tokio::test]
+async fn can_demote_admin_when_another_active_admin_exists() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    // Create a second admin.
+    let body = serde_json::json!({
+        "username": "admin2", "email": "a2@clinic.local",
+        "password": "secure123", "role": "admin",
+        "first_name": "Admin", "last_name": "Two",
+    });
+    let r = app.post("/api/users").auth(&t).json(&body).send().await.unwrap();
+    let id = body_json(r).await["id"].as_i64().unwrap();
+
+    // Demoting the second admin to doctor should succeed (original admin remains).
+    let body = serde_json::json!({ "role": "doctor" });
+    let resp = app.put(&format!("/api/users/{}", id)).auth(&t).json(&body).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let v = body_json(resp).await;
+    assert_eq!(v["role"], "doctor");
+}
+
 #[tokio::test]
 async fn users_endpoints_require_admin() {
     let app = TestApp::spawn().await;

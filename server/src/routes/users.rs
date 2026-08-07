@@ -58,6 +58,18 @@ pub async fn create(State(state): State<AppState>, Json(b): Json<CreateUser>) ->
 }
 
 pub async fn update(State(state): State<AppState>, Path(id): Path<i64>, Json(b): Json<UpdateUser>) -> ApiResult<Json<StaffUser>> {
+    // Fetch the user's current role/is_active so we can guard the last-active-
+    // admin invariant on role-change and deactivation. (Same invariant `delete`
+    // and `toggle_active` already guard — without it, an admin could demote or
+    // deactivate themselves and brick the system: no active admin can log in.)
+    let current: Option<(String, bool)> = sqlx::query_as(
+        "SELECT role, is_active FROM users WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (cur_role, cur_active) = current.ok_or(ApiError::NotFound)?;
+
     // Build a dynamic update — only set provided fields.
     if let Some(email) = b.email {
         sqlx::query("UPDATE users SET email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(&email).bind(id).execute(&state.db).await?;
@@ -65,6 +77,19 @@ pub async fn update(State(state): State<AppState>, Path(id): Path<i64>, Json(b):
     if let Some(role) = b.role {
         if !["admin", "doctor", "nurse", "receptionist", "readonly"].contains(&role.as_str()) {
             return Err(ApiError::BadRequest("Invalid role".into()));
+        }
+        // Guard: demoting the last active admin to a non-admin role would
+        // leave zero active admins. Reject it.
+        if cur_role == "admin" && role != "admin" && cur_active {
+            let active_admins: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = 1")
+                    .fetch_one(&state.db)
+                    .await?;
+            if active_admins <= 1 {
+                return Err(ApiError::BadRequest(
+                    "Cannot demote the last active admin".into(),
+                ));
+            }
         }
         sqlx::query("UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(&role).bind(id).execute(&state.db).await?;
     }
@@ -75,6 +100,18 @@ pub async fn update(State(state): State<AppState>, Path(id): Path<i64>, Json(b):
         sqlx::query("UPDATE users SET last_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(&last).bind(id).execute(&state.db).await?;
     }
     if let Some(active) = b.is_active {
+        // Guard: deactivating the last active admin would brick the system.
+        if !active && cur_role == "admin" && cur_active {
+            let active_admins: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = 1")
+                    .fetch_one(&state.db)
+                    .await?;
+            if active_admins <= 1 {
+                return Err(ApiError::BadRequest(
+                    "Cannot deactivate the last active admin".into(),
+                ));
+            }
+        }
         sqlx::query("UPDATE users SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(active).bind(id).execute(&state.db).await?;
     }
     if let Some(ref pw) = b.password {
@@ -88,8 +125,25 @@ pub async fn update(State(state): State<AppState>, Path(id): Path<i64>, Json(b):
 }
 
 pub async fn toggle_active(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Json<serde_json::Value>> {
-    let row = sqlx::query("SELECT is_active FROM users WHERE id = ?").bind(id).fetch_optional(&state.db).await?.ok_or(ApiError::NotFound)?;
+    let row = sqlx::query("SELECT is_active, role FROM users WHERE id = ?").bind(id).fetch_optional(&state.db).await?.ok_or(ApiError::NotFound)?;
     let current: bool = row.get("is_active");
+    let role: String = row.get("role");
+
+    // Guard: never deactivate the last active admin (would brick the system —
+    // no active admin can log in to recover it). Mirrors the guard in `delete`.
+    // Toggling an already-inactive user ON is always safe (current=false).
+    if current && role == "admin" {
+        let active_admins: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = 1")
+                .fetch_one(&state.db)
+                .await?;
+        if active_admins <= 1 {
+            return Err(ApiError::BadRequest(
+                "Cannot deactivate the last active admin".into(),
+            ));
+        }
+    }
+
     sqlx::query("UPDATE users SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(!current).bind(id).execute(&state.db).await?;
     Ok(Json(serde_json::json!({ "id": id, "is_active": !current })))
