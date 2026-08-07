@@ -343,3 +343,331 @@ async fn concurrent_payments_cannot_overpay() {
         );
     }
 }
+
+// ---------- Last-active-admin TOCTOU race ----------
+
+/// Create a second active admin and return its id. The seeded admin (id=1) is
+/// the first; after this call there are exactly two active admins.
+async fn create_second_admin(app: &TestApp, t: &str, username: &str) -> i64 {
+    let body = serde_json::json!({
+        "username": username,
+        "email": format!("{}@clinic.local", username),
+        "password": "secure123",
+        "role": "admin",
+        "first_name": "Admin",
+        "last_name": username,
+    });
+    let r = app.post("/api/users").auth(t).json(&body).send().await.unwrap();
+    assert_eq!(r.status(), 201, "creating second admin should succeed");
+    body_json(r).await["id"].as_i64().unwrap()
+}
+
+/// Count active admins directly from the DB (source of truth for the
+/// invariant — independent of the API response).
+async fn active_admin_count(app: &TestApp) -> i64 {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = 1",
+    )
+    .fetch_one(&app.state.db)
+    .await
+    .unwrap();
+    n
+}
+
+/// N concurrent `toggle_active` requests that each try to deactivate one of
+/// two active admins must NOT leave zero active admins.
+///
+/// Before the fix, `toggle_active` did:
+///
+/// ```text
+///   SELECT is_active, role FROM users WHERE id = ?      -- (1) read
+///   if active && role == 'admin':
+///       SELECT COUNT(*) FROM users WHERE role='admin' AND is_active=1  -- (2)
+///       if count <= 1 { return 400 }                                  -- (3)
+///   UPDATE users SET is_active = 0 WHERE id = ?                      -- (4)
+/// ```
+///
+/// with NO transaction. Two concurrent requests that each deactivate one of
+/// two active admins could BOTH read `count = 2` (each sees both still
+/// active), BOTH pass the `count <= 1` guard, and BOTH run their UPDATE —
+/// leaving zero active admins and bricking login.
+///
+/// The fix wraps steps 1–4 in `BEGIN IMMEDIATE`, serializing writers so the
+/// second deactivation sees `count = 1` and is rejected.
+///
+/// Invariant after the fix:
+///   * no 500s
+///   * `active_admin_count >= 1` always (never bricked)
+///   * at most N-1 of the N requests succeed (at least one must be rejected)
+#[tokio::test]
+async fn concurrent_toggle_cannot_zero_admins() {
+    let app = Arc::new(TestApp::spawn().await);
+    let t = token(&app).await;
+    // Two active admins: seeded (id=1) + admin2.
+    let id2 = create_second_admin(&app, &t, "admin2").await;
+    assert_eq!(active_admin_count(&app).await, 2);
+
+    // Fire one toggle per admin concurrently. If both succeed, we hit 0.
+    let n = 2usize;
+    let targets = [1i64, id2];
+    let mut handles = Vec::with_capacity(n);
+    for &tid in &targets {
+        let app = app.clone();
+        let t = t.clone();
+        handles.push(tokio::spawn(async move {
+            app.post(&format!("/api/users/{}/toggle", tid)).auth(&t).send().await
+        }));
+    }
+
+    let mut statuses = Vec::with_capacity(n);
+    for h in handles {
+        let resp = h.await.expect("task panicked").expect("send failed");
+        let status = resp.status().as_u16();
+        assert_ne!(status, 500, "concurrent toggle returned 500 — race not handled cleanly");
+        statuses.push(status);
+    }
+
+    let ok = statuses.iter().filter(|&&s| s == 200).count();
+    let rejected = statuses.iter().filter(|&&s| s == 400).count();
+    eprintln!("toggle-race: statuses={:?} ok={} rejected={}", statuses, ok, rejected);
+
+    // At least one must be rejected — we can never drop to 0 active admins.
+    assert!(
+        ok < n,
+        "TOCTOU race: all {} concurrent deactivations succeeded, leaving zero active admins. statuses={:?}",
+        n, statuses
+    );
+    assert_eq!(
+        ok + rejected, n,
+        "every request must be 200 or 400; got {:?}", statuses
+    );
+
+    // The critical invariant: at least one active admin remains.
+    let final_count = active_admin_count(&app).await;
+    assert!(
+        final_count >= 1,
+        "BRICKED: zero active admins after concurrent toggle. statuses={:?}",
+        statuses
+    );
+}
+
+/// N concurrent `update` requests that each try to DEMOTE one of two active
+/// admins (role: admin -> doctor) must NOT leave zero active admins.
+///
+/// Same race as `concurrent_toggle_cannot_zero_admins` but via the
+/// `update` handler's role-change path. The fix wraps the read-guard-write
+/// in `BEGIN IMMEDIATE`.
+#[tokio::test]
+async fn concurrent_demote_cannot_zero_admins() {
+    let app = Arc::new(TestApp::spawn().await);
+    let t = token(&app).await;
+    let id2 = create_second_admin(&app, &t, "admin3").await;
+    assert_eq!(active_admin_count(&app).await, 2);
+
+    let n = 2usize;
+    let targets = [1i64, id2];
+    let mut handles = Vec::with_capacity(n);
+    for &tid in &targets {
+        let app = app.clone();
+        let t = t.clone();
+        let body = serde_json::json!({ "role": "doctor" });
+        handles.push(tokio::spawn(async move {
+            app.put(&format!("/api/users/{}", tid)).auth(&t).json(&body).send().await
+        }));
+    }
+
+    let mut statuses = Vec::with_capacity(n);
+    for h in handles {
+        let resp = h.await.expect("task panicked").expect("send failed");
+        let status = resp.status().as_u16();
+        assert_ne!(status, 500, "concurrent demote returned 500");
+        statuses.push(status);
+    }
+
+    let ok = statuses.iter().filter(|&&s| s == 200).count();
+    let rejected = statuses.iter().filter(|&&s| s == 400).count();
+    eprintln!("demote-race: statuses={:?} ok={} rejected={}", statuses, ok, rejected);
+
+    assert!(
+        ok < n,
+        "TOCTOU race: all {} concurrent demotions succeeded, leaving zero active admins. statuses={:?}",
+        n, statuses
+    );
+    assert_eq!(
+        ok + rejected, n,
+        "every request must be 200 or 400; got {:?}", statuses
+    );
+
+    let final_count = active_admin_count(&app).await;
+    assert!(
+        final_count >= 1,
+        "BRICKED: zero active admins after concurrent demote. statuses={:?}",
+        statuses
+    );
+}
+
+/// N concurrent `update` requests that each try to DEACTIVATE one of two
+/// active admins (is_active: false) must NOT leave zero active admins.
+///
+/// Same race via the `update` handler's is_active-change path.
+#[tokio::test]
+async fn concurrent_deactivate_cannot_zero_admins() {
+    let app = Arc::new(TestApp::spawn().await);
+    let t = token(&app).await;
+    let id2 = create_second_admin(&app, &t, "admin4").await;
+    assert_eq!(active_admin_count(&app).await, 2);
+
+    let n = 2usize;
+    let targets = [1i64, id2];
+    let mut handles = Vec::with_capacity(n);
+    for &tid in &targets {
+        let app = app.clone();
+        let t = t.clone();
+        let body = serde_json::json!({ "is_active": false });
+        handles.push(tokio::spawn(async move {
+            app.put(&format!("/api/users/{}", tid)).auth(&t).json(&body).send().await
+        }));
+    }
+
+    let mut statuses = Vec::with_capacity(n);
+    for h in handles {
+        let resp = h.await.expect("task panicked").expect("send failed");
+        let status = resp.status().as_u16();
+        assert_ne!(status, 500, "concurrent deactivate returned 500");
+        statuses.push(status);
+    }
+
+    let ok = statuses.iter().filter(|&&s| s == 200).count();
+    let rejected = statuses.iter().filter(|&&s| s == 400).count();
+    eprintln!("deactivate-race: statuses={:?} ok={} rejected={}", statuses, ok, rejected);
+
+    assert!(
+        ok < n,
+        "TOCTOU race: all {} concurrent deactivations succeeded, leaving zero active admins. statuses={:?}",
+        n, statuses
+    );
+    assert_eq!(
+        ok + rejected, n,
+        "every request must be 200 or 400; got {:?}", statuses
+    );
+
+    let final_count = active_admin_count(&app).await;
+    assert!(
+        final_count >= 1,
+        "BRICKED: zero active admins after concurrent deactivate. statuses={:?}",
+        statuses
+    );
+}
+
+/// N concurrent `delete` requests that each try to DELETE one of two active
+/// admins must NOT leave zero active admins.
+///
+/// Same race via the `delete` handler.
+#[tokio::test]
+async fn concurrent_delete_cannot_zero_admins() {
+    let app = Arc::new(TestApp::spawn().await);
+    let t = token(&app).await;
+    let id2 = create_second_admin(&app, &t, "admin5").await;
+    assert_eq!(active_admin_count(&app).await, 2);
+
+    let n = 2usize;
+    let targets = [1i64, id2];
+    let mut handles = Vec::with_capacity(n);
+    for &tid in &targets {
+        let app = app.clone();
+        let t = t.clone();
+        handles.push(tokio::spawn(async move {
+            app.delete(&format!("/api/users/{}", tid)).auth(&t).send().await
+        }));
+    }
+
+    let mut statuses = Vec::with_capacity(n);
+    for h in handles {
+        let resp = h.await.expect("task panicked").expect("send failed");
+        let status = resp.status().as_u16();
+        assert_ne!(status, 500, "concurrent delete returned 500");
+        statuses.push(status);
+    }
+
+    let ok = statuses.iter().filter(|&&s| s == 200).count();
+    let rejected = statuses.iter().filter(|&&s| s == 400).count();
+    eprintln!("delete-race: statuses={:?} ok={} rejected={}", statuses, ok, rejected);
+
+    assert!(
+        ok < n,
+        "TOCTOU race: all {} concurrent deletes succeeded, leaving zero active admins. statuses={:?}",
+        n, statuses
+    );
+    assert_eq!(
+        ok + rejected, n,
+        "every request must be 200 or 400; got {:?}", statuses
+    );
+
+    let final_count = active_admin_count(&app).await;
+    assert!(
+        final_count >= 1,
+        "BRICKED: zero active admins after concurrent delete. statuses={:?}",
+        statuses
+    );
+}
+
+/// Higher-contention stress: 10 concurrent requests all targeting the SAME
+/// last active admin (the seeded admin, id=1) via a mix of toggle/demote/
+/// deactivate/delete. Even under contention, the admin count must never hit
+/// 0 and no request may 500.
+///
+/// This is a "shotgun" test: it does not assert a specific accept/reject
+/// count (only one admin exists, so every request should be rejected), but
+/// it verifies the guard holds under sustained concurrent pressure and that
+/// the serializing transaction does not deadlock or 500.
+#[tokio::test]
+async fn concurrent_mixed_attack_on_last_admin_never_bricks() {
+    let app = Arc::new(TestApp::spawn().await);
+    let t = token(&app).await;
+    // Only one active admin (the seeded one).
+    assert_eq!(active_admin_count(&app).await, 1);
+
+    let n = 10usize;
+    let mut handles = Vec::with_capacity(n);
+    for i in 0..n {
+        let app = app.clone();
+        let t = t.clone();
+        handles.push(tokio::spawn(async move {
+            // Cycle through all four attack vectors.
+            match i % 4 {
+                0 => app.post("/api/users/1/toggle").auth(&t).send().await,
+                1 => app.put("/api/users/1").auth(&t).json(&serde_json::json!({"role": "doctor"})).send().await,
+                2 => app.put("/api/users/1").auth(&t).json(&serde_json::json!({"is_active": false})).send().await,
+                _ => app.delete("/api/users/1").auth(&t).send().await,
+            }
+        }));
+    }
+
+    let mut statuses = Vec::with_capacity(n);
+    for h in handles {
+        let resp = h.await.expect("task panicked").expect("send failed");
+        let status = resp.status().as_u16();
+        assert_ne!(status, 500, "concurrent attack returned 500 — race not handled cleanly");
+        statuses.push(status);
+    }
+    eprintln!("mixed-attack: statuses={:?}", statuses);
+
+    // Every request should be rejected (only one admin; nothing can reduce
+    // the count without bricking). Some may be 400 (guard hit); a toggle ON
+    // is theoretically possible if scheduling flips state, but since we start
+    // active and every request tries to deactivate/demote/delete, the first
+    // to run sees count=1 and is rejected, and all subsequent see count=1 too.
+    let ok = statuses.iter().filter(|&&s| s == 200).count();
+    assert_eq!(
+        ok, 0,
+        "expected all {} attacks on the last admin to be rejected, but {} succeeded. statuses={:?}",
+        n, ok, statuses
+    );
+
+    // The invariant: still exactly one active admin, still active, still admin.
+    assert_eq!(
+        active_admin_count(&app).await, 1,
+        "BRICKED: active admin count changed under mixed attack. statuses={:?}",
+        statuses
+    );
+}
