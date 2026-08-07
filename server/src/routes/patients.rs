@@ -195,6 +195,28 @@ pub async fn delete(
     // We check the tables that represent real patient history. (Photos and
     // messages are intentionally omitted: photos can be re-uploaded and
     // messages are an inbox, not a clinical record.)
+    //
+    // ---- TOCTOU race fix -----------------------------------------------
+    //
+    // Previously the 5 COUNT(*) guard queries and the DELETE ran as separate
+    // statements with NO transaction. A concurrent request could INSERT a
+    // dependent row (e.g. a new appointment or invoice for this patient) in
+    // the window between the guard checks and the DELETE — the DELETE would
+    // then succeed and silently orphan that new row (FK enforcement is off,
+    // so nothing catches it). For a medical PMS, orphaning a just-created
+    // clinical/financial record is exactly the data loss the guard exists to
+    // prevent.
+    //
+    // Wrap the guard + DELETE in `BEGIN IMMEDIATE`, which acquires the SQLite
+    // write lock at transaction start and serializes writers. Any concurrent
+    // INSERT into a dependent table either commits before our guard runs (so
+    // the COUNT sees it and we reject the delete) or waits until our
+    // transaction commits. The key guarantee: no INSERT can slip into the gap
+    // between the guard and the DELETE. (Matches the users.rs / billing.rs
+    // pattern.)
+    let mut conn = state.db.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
     let blockers: [(&str, &str); 5] = [
         ("appointments",  "SELECT COUNT(*) FROM appointments WHERE patient_id = ?"),
         ("invoices",      "SELECT COUNT(*) FROM invoices WHERE patient_id = ?"),
@@ -204,12 +226,13 @@ pub async fn delete(
     ];
     let mut blocking_tables = Vec::new();
     for (name, sql) in &blockers {
-        let n: i64 = sqlx::query_scalar(sql).bind(id).fetch_one(&state.db).await?;
+        let n: i64 = sqlx::query_scalar(sql).bind(id).fetch_one(&mut *conn).await?;
         if n > 0 {
             blocking_tables.push(*name);
         }
     }
     if !blocking_tables.is_empty() {
+        sqlx::query("ROLLBACK").execute(&mut *conn).await?;
         return Err(ApiError::Conflict(format!(
             "cannot delete patient {}: dependent record(s) exist in [{}]; \
              remove or reassign them first (a proper merge/anonymize workflow is TBD)",
@@ -220,9 +243,11 @@ pub async fn delete(
 
     let r = sqlx::query("DELETE FROM patients WHERE id = ?")
         .bind(id)
-        .execute(&state.db)
+        .execute(&mut *conn)
         .await?;
-    if r.rows_affected() == 0 {
+    let rows_affected = r.rows_affected();
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
+    if rows_affected == 0 {
         return Err(ApiError::NotFound);
     }
     Ok(Json(shared::MessageResponse { message: "Patient deleted successfully".into() }))
