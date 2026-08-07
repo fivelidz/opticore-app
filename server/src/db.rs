@@ -160,3 +160,89 @@ fn generate_password(len: usize) -> String {
     }
     s
 }
+
+/// Re-seed "structural invariant" tables that must not be empty.
+///
+/// The data_io replace-mode import (`POST /api/data/import` with
+/// `mode: "replace"`) does `DELETE FROM <table>` for every table present in
+/// the snapshot, then inserts the snapshot's rows. If a structural table is
+/// in the snapshot with an **empty array**, it is wiped and not repopulated.
+/// That can brick the system:
+///
+///   - `users` with no admin row → no one can log in (no way to recover via
+///     the API; only out-of-band DB surgery or a re-seed can restore access).
+///   - `consultation_types` / `services` empty → the billing/booking catalogs
+///     are gone; staff can't book or bill until re-seeded.
+///
+/// (`booking_settings` is NOT in the import allowlist, so replace-mode never
+/// deletes it; its own lazy-init in `load_settings` covers the out-of-band
+/// DELETE case.)
+///
+/// This function is called after a replace-mode import commits. For each
+/// structural table that ended up empty, it re-runs the same seed the
+/// migration installed (idempotent via `INSERT OR IGNORE` / count guards).
+/// The admin is re-provisioned with a fresh random password (printed to the
+/// log, exactly like first boot) — there is no way to recover the old hash
+/// from an empty table.
+pub async fn reseed_structural_invariants(pool: &SqlitePool) -> Result<()> {
+    // --- admin user ---
+    // If the import wiped all admins, re-create one with a fresh random
+    // password. We cannot recover the original password hash, so this is a
+    // "break-glass" re-seed: the operator must read the new password from the
+    // server log and change it after login.
+    let admin_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'admin'")
+            .fetch_one(pool)
+            .await?;
+    if admin_count == 0 {
+        let pw = generate_password(20);
+        provision_admin(pool, &pw).await?;
+        warn!("replace-mode import left users table with no admin; re-seeded a fresh admin (see credentials above). Change the password after login.");
+    }
+
+    // --- consultation_types catalog ---
+    // Re-run the 0003 seed. INSERT OR IGNORE makes this safe if rows survived.
+    let ct_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM consultation_types")
+            .fetch_one(pool)
+            .await?;
+    if ct_count == 0 {
+        sqlx::query(
+            "INSERT OR IGNORE INTO consultation_types (type_code, type_name, description, default_price, default_duration_minutes, medicare_item_number) VALUES
+             ('DRY-EYE', 'Dry Eye Consultation', 'Comprehensive dry eye assessment', 350, 60, '10910'),
+             ('FOLLOWUP', 'Follow-up', 'Review consultation', 150, 30, '10912'),
+             ('IPL', 'IPL Treatment', 'Intense Pulsed Light therapy session', 300, 45, NULL),
+             ('IMAGING', 'Imaging', 'Diagnostic imaging session', 250, 30, NULL),
+             ('TELEHEALTH', 'Telehealth', 'Remote consultation', 120, 20, '91852')",
+        )
+        .execute(pool)
+        .await?;
+        warn!("replace-mode import left consultation_types empty; re-seeded default catalog.");
+    }
+
+    // --- services catalog ---
+    let svc_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM services")
+            .fetch_one(pool)
+            .await?;
+    if svc_count == 0 {
+        sqlx::query(
+            "INSERT OR IGNORE INTO services (service_code, service_name, category, description, unit_price, unit_type, tax_rate) VALUES
+             ('IPL-SESSION', 'IPL Therapy Session', 'treatment', 'Single IPL treatment', 300, 'each', 0.10),
+             ('OPTILIGHT', 'OptiLight Treatment', 'treatment', 'IPL OptiLight session', 275, 'each', 0.10),
+             ('KERATO-5M', 'Keratograph 5M Imaging', 'imaging', 'Ocular surface imaging', 180, 'each', 0.10),
+             ('LIPIVIEW', 'LipiView II', 'imaging', 'Lipid layer imaging', 200, 'each', 0.10),
+             ('TBUT', 'Tear Break-Up Time', 'imaging', 'TBUT test', 90, 'each', 0.10),
+             ('RESTASIS', 'Restasis 0.05%', 'medication', 'Cyclosporine emulsion', 95, 'each', 0.10),
+             ('XIIDRA', 'Xiidra 5%', 'medication', 'Lifitegrast eye drops', 110, 'each', 0.10),
+             ('ARTIFICIAL', 'Artificial Tears', 'medication', 'Lubricant drops', 25, 'each', 0.10),
+             ('WARM-COMP', 'Warm Compress', 'supply', 'Eye mask', 35, 'each', 0.10),
+             ('SUPPLY-OTHER', 'Other Supply', 'supply', 'Misc supply item', 20, 'each', 0.10)",
+        )
+        .execute(pool)
+        .await?;
+        warn!("replace-mode import left services empty; re-seeded default catalog.");
+    }
+
+    Ok(())
+}

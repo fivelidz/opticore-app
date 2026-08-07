@@ -737,3 +737,127 @@ async fn import_reports_all_violations_not_just_first() {
         "error should enumerate BOTH violations, got: {body}"
     );
 }
+
+// ---------- replace-mode structural-invariant preservation ----------
+//
+// Replace-mode does DELETE FROM <table> for every table in the snapshot. If a
+// structural table (users / consultation_types / services) is in the snapshot
+// with an EMPTY array, it gets wiped and not repopulated — bricking the system
+// (no admin to log in, no billing catalog). The import path now re-seeds any
+// structural table that ends up empty after a replace-mode import.
+
+/// Replace-import with an empty `users` array must re-seed an admin row so the
+/// system is not bricked (no login possible).
+#[tokio::test]
+async fn replace_import_empty_users_reseeds_admin() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+
+    // Precondition: an admin exists.
+    assert!(count_rows(&app, "users").await >= 1);
+
+    // Replace-import with an empty users array — would brick the system
+    // without the re-seed guard.
+    let snap = make_snapshot(serde_json::json!({
+        "users": []
+    }));
+    let (status, _v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 200);
+
+    // An admin must still exist (re-seeded).
+    let admin_count: i64 = {
+        use sqlx::Row;
+        sqlx::query("SELECT COUNT(*) FROM users WHERE role = 'admin'")
+            .fetch_one(&app.state.db)
+            .await
+            .unwrap()
+            .get(0)
+    };
+    assert_eq!(admin_count, 1, "admin should be re-seeded after empty-users replace-import");
+}
+
+/// Replace-import with an empty `consultation_types` array must re-seed the
+/// default catalog.
+#[tokio::test]
+async fn replace_import_empty_consultation_types_reseeds_catalog() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+
+    let snap = make_snapshot(serde_json::json!({
+        "consultation_types": []
+    }));
+    let (status, _v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 200);
+
+    // The 0003 seed installs 5 consultation types; re-seed should restore them.
+    let n = count_rows(&app, "consultation_types").await;
+    assert_eq!(n, 5, "consultation_types catalog should be re-seeded with 5 defaults");
+}
+
+/// Replace-import with an empty `services` array must re-seed the default catalog.
+#[tokio::test]
+async fn replace_import_empty_services_reseeds_catalog() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+
+    let snap = make_snapshot(serde_json::json!({
+        "services": []
+    }));
+    let (status, _v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 200);
+
+    // The 0003 seed installs 10 services; re-seed should restore them.
+    let n = count_rows(&app, "services").await;
+    assert_eq!(n, 10, "services catalog should be re-seeded with 10 defaults");
+}
+
+/// Replace-import that OMITS a structural table entirely must NOT delete it.
+/// (The DELETE only runs for tables present in the snapshot; an omitted table
+/// is untouched. This characterizes that existing behavior so a future
+/// refactor doesn't regress it.)
+#[tokio::test]
+async fn replace_import_omitting_users_preserves_rows() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+
+    let before = count_rows(&app, "users").await;
+    assert!(before >= 1);
+
+    // Snapshot with a non-structural table but NO users key at all.
+    let snap = make_snapshot(serde_json::json!({
+        "patients": []
+    }));
+    let (status, _v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 200);
+
+    let after = count_rows(&app, "users").await;
+    assert_eq!(after, before, "users table should be untouched when omitted from snapshot");
+}
+
+/// Merge-mode must NEVER delete, even with an empty structural-table array.
+/// (Merge skips existing PKs; an empty array is a no-op. The re-seed guard is
+/// replace-only, so this confirms merge doesn't accidentally trigger it or
+/// wipe data.)
+#[tokio::test]
+async fn merge_import_empty_users_preserves_rows() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+
+    let before = count_rows(&app, "users").await;
+    assert!(before >= 1);
+
+    let snap = make_snapshot(serde_json::json!({
+        "users": []
+    }));
+    let resp = app
+        .post("/api/data/import")
+        .auth(&t)
+        .json(&serde_json::json!({ "snapshot": snap, "mode": "merge" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let after = count_rows(&app, "users").await;
+    assert_eq!(after, before, "merge mode must not delete users");
+}

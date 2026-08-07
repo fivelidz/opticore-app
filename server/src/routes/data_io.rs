@@ -474,6 +474,25 @@ pub async fn import_data(
     drop(conn);
 
     import_result?;
+
+    // Replace-mode structural-invariant re-seed.
+    //
+    // Replace-mode does `DELETE FROM <table>` for every table in the snapshot.
+    // If a structural table (one the app cannot function without) was present
+    // in the snapshot with an EMPTY array, it is now empty — which can brick
+    // the system (no admin to log in with, no billing/booking catalog). Merge
+    // mode never deletes, so it cannot trigger this.
+    //
+    // Re-seed any structural table that ended up empty. This runs AFTER the
+    // transaction committed and AFTER FK enforcement was restored on the
+    // connection, so the re-seed executes under normal FK-on conditions. See
+    // `db::reseed_structural_invariants` for the full table list.
+    if mode == "replace" {
+        crate::db::reseed_structural_invariants(&state.db)
+            .await
+            .map_err(|e| ApiError::Internal(format!("reseed structural invariants: {e}")))?;
+    }
+
     Ok(Json(serde_json::json!({ "imported": imported, "tables": data.len(), "mode": mode, "snapshot_version": snapshot.meta.snapshot_version })))
 }
 
