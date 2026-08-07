@@ -62,11 +62,41 @@ fn fill_template(tmpl: &str, name: &str, date: &str, time: &str, appt_type: &str
         .replace("{{type}}", appt_type)
 }
 
+/// Load the single booking-settings row (id = 1).
+///
+/// **Lazy-init invariant:** `booking_settings` is a single-row config table
+/// with `CHECK (id = 1)` (migration 0008). The schema guarantees that *if* a
+/// row exists it has id=1, but it does NOT guarantee a row exists at all — a
+/// `DELETE FROM booking_settings` (e.g. via the sqlite CLI, a bug, or a future
+/// code path) leaves the table empty, after which every caller of this
+/// function (GET, PUT, approve/decline/queue notification flows) would 404 or
+/// 500. There is intentionally no DELETE route on this resource, but the DB
+/// row can still be removed out-of-band.
+///
+/// To make the "id=1 always exists" invariant robust without trigger magic,
+/// we lazy-init here: if the row is missing, re-seed it with the migration's
+/// column defaults (`INSERT OR IGNORE INTO booking_settings (id) VALUES (1)`)
+/// and then return it. This is idempotent and matches the seed in 0008 exactly.
+/// The cost is one extra round-trip only when the row is absent (the rare
+/// repair path); the happy path is a single SELECT.
 async fn load_settings(state: &AppState) -> ApiResult<BookingSettings> {
     let row = sqlx::query("SELECT * FROM booking_settings WHERE id = 1")
         .fetch_optional(&state.db)
-        .await?
-        .ok_or(ApiError::NotFound)?;
+        .await?;
+    let row = match row {
+        Some(r) => r,
+        // Row missing (deleted out-of-band, or seed somehow didn't run).
+        // Re-seed the default row, then re-fetch. INSERT OR IGNORE keeps this
+        // safe against a concurrent insert racing between our SELECT and INSERT.
+        None => {
+            sqlx::query("INSERT OR IGNORE INTO booking_settings (id) VALUES (1)")
+                .execute(&state.db)
+                .await?;
+            sqlx::query("SELECT * FROM booking_settings WHERE id = 1")
+                .fetch_one(&state.db)
+                .await?
+        }
+    };
     Ok(row_to_settings(&row))
 }
 
@@ -124,6 +154,16 @@ pub async fn update_settings(
     if b.template_booking_confirmed.is_some() { sets.push("template_booking_confirmed = ?"); }
     if b.template_booking_declined.is_some() { sets.push("template_booking_declined = ?"); }
     if b.template_reminder.is_some() { sets.push("template_reminder = ?"); }
+
+    // Ensure the id=1 row exists before updating. If it was deleted
+    // out-of-band (see `load_settings`'s lazy-init note), a bare
+    // `UPDATE ... WHERE id = 1` would silently affect 0 rows and the caller's
+    // requested changes would be dropped. Re-seed the default first, then the
+    // UPDATE below applies the caller's fields on top of it. INSERT OR IGNORE
+    // makes this a no-op on the happy path (row already present).
+    sqlx::query("INSERT OR IGNORE INTO booking_settings (id) VALUES (1)")
+        .execute(&state.db)
+        .await?;
 
     if !sets.is_empty() {
         sets.push("updated_at = CURRENT_TIMESTAMP");
