@@ -216,3 +216,130 @@ async fn concurrent_payments_no_lost_update() {
         .unwrap();
     assert_eq!(count.0, n as i64, "expected {} payment rows, got {}", n, count.0);
 }
+
+/// N concurrent payments whose **combined** total exceeds the invoice
+/// balance must NOT overpay the invoice.
+///
+/// This is the critical overpayment race. The pre-fix `add_payment` did:
+///
+/// ```text
+///   SELECT balance_due FROM invoices WHERE id = ?   -- (1) read
+///   if amount > balance_due { return 400 }          -- (2) check
+///   INSERT INTO payments ...                        -- (3) write
+///   UPDATE invoices SET amount_paid = amount_paid + ?, balance_due = ...
+/// ```
+///
+/// with **no transaction** wrapping steps 1–4. Two concurrent payments of
+/// $60 against a $100 invoice both read `balance_due = 100`, both pass the
+/// `60 <= 100` check, both insert a payment row, and both run the UPDATE.
+/// The result: `amount_paid = 120`, `balance_due = MAX(0, 100-120) = 0` —
+/// the invoice is silently overpaid by $20 and both callers got HTTP 200.
+///
+/// The fix wraps the balance read + overpayment check + payment insert +
+/// invoice update in a single `BEGIN IMMEDIATE` transaction. SQLite
+/// serializes writers, so the second payment's `SELECT balance_due` only
+/// runs after the first has committed — it then sees `balance_due = 40`
+/// and is correctly rejected as a $60-over-$40 overpay (HTTP 400).
+///
+/// Invariant after the fix:
+///   * no 500s
+///   * `amount_paid <= total_amount` (never overpaid)
+///   * `balance_due >= 0`
+///   * `balance_due == total_amount - amount_paid` (consistent)
+///   * sum of accepted payment amounts == amount_paid (no lost updates)
+#[tokio::test]
+async fn concurrent_payments_cannot_overpay() {
+    let app = Arc::new(TestApp::spawn().await);
+    let t = token(&app).await;
+    let pid = create_patient(&app, &t, "OverpayRace").await;
+
+    // Create a $100 invoice.
+    let body = serde_json::json!({
+        "patient_id": pid,
+        "items": [{ "item_type": "consultation", "description": "Hundred", "quantity": 1.0, "unit_price": 100.0 }],
+    });
+    let r = app.post("/api/billing/invoices").auth(&t).json(&body).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let inv_id = body_json(r).await["id"].as_i64().unwrap();
+
+    // 10 concurrent $60 payments against a $100 invoice. At most ONE can
+    // legitimately succeed (the first to grab the write lock pays $60,
+    // leaving $40; every subsequent $60 payment exceeds $40 and must be
+    // rejected). If the race exists, multiple will succeed and the invoice
+    // will be overpaid.
+    let n = 10usize;
+    let amount = 60.0f64;
+    let mut handles = Vec::with_capacity(n);
+    for _ in 0..n {
+        let app = app.clone();
+        let t = t.clone();
+        let pay = serde_json::json!({ "invoice_id": inv_id, "amount": amount, "payment_method": "card" });
+        handles.push(tokio::spawn(async move {
+            app.post("/api/billing/payments").auth(&t).json(&pay).send().await
+        }));
+    }
+
+    let mut statuses = Vec::with_capacity(n);
+    for h in handles {
+        let resp = h.await.expect("task panicked").expect("send failed");
+        let status = resp.status().as_u16();
+        // No request should ever return 500.
+        assert_ne!(status, 500, "concurrent payment returned 500 — race not handled cleanly");
+        statuses.push(status);
+    }
+
+    let accepted = statuses.iter().filter(|&&s| s == 200).count();
+    let rejected = statuses.iter().filter(|&&s| s == 400).count();
+    eprintln!("overpay-race: statuses={:?} accepted={} rejected={}", statuses, accepted, rejected);
+
+    // At most ONE $60 payment can fit in a $100 balance. If more than one
+    // was accepted, the invoice was overpaid — the race exists.
+    assert!(
+        accepted <= 1,
+        "overpayment race: {} concurrent $60 payments were accepted against a $100 invoice \
+         (at most 1 should be). statuses={:?}",
+        accepted, statuses
+    );
+    // The rest must be clean 400 rejections (overpay), not 500s.
+    assert_eq!(
+        accepted + rejected, n,
+        "every request must be either 200 (accepted) or 400 (overpay rejected); got {:?}",
+        statuses
+    );
+
+    // Verify the invoice is NOT overpaid.
+    let row: (f64, f64, f64) =
+        sqlx::query_as("SELECT total_amount, amount_paid, balance_due FROM invoices WHERE id = ?")
+            .bind(inv_id)
+            .fetch_one(&app.state.db)
+            .await
+            .unwrap();
+    let (total, paid, balance) = row;
+    assert!(
+        paid <= total + 0.01,
+        "invoice overpaid: amount_paid={} > total_amount={}", paid, total
+    );
+    assert!(
+        balance >= -0.01,
+        "balance_due went negative: {}", balance
+    );
+    // Consistency: balance_due == total_amount - amount_paid.
+    assert!(
+        (balance - (total - paid)).abs() < 0.01,
+        "inconsistent invoice state: balance_due={} but total-paid={}", balance, total - paid
+    );
+
+    // If exactly one payment was accepted, amount_paid must be $60.
+    if accepted == 1 {
+        assert!(
+            (paid - amount).abs() < 0.01,
+            "expected amount_paid={} for one accepted payment, got {}", amount, paid
+        );
+    } else {
+        // Zero accepted (pathological scheduling) — amount_paid must be 0.
+        assert!(
+            paid.abs() < 0.01,
+            "no payments accepted but amount_paid={}", paid
+        );
+    }
+}

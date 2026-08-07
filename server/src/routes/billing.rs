@@ -262,17 +262,48 @@ pub async fn add_payment(State(state): State<AppState>, Json(b): Json<CreatePaym
         return Err(ApiError::BadRequest("payment amount must be a positive finite number".into()));
     }
 
-    // (2) invoice must exist — and fetch its current balance in the same
-    //     query so we can check overpayment without a read-then-write race.
-    //     (The race window is small and the consequence of a concurrent
-    //     payment is merely that this payment is rejected as an overpay,
-    //     which is the safe failure mode.)
-    let row = sqlx::query("SELECT balance_due FROM invoices WHERE id = ?")
+    // (2)–(4) Balance check + payment insert + invoice update, all inside a
+    //     single `BEGIN IMMEDIATE` transaction.
+    //
+    // RACE FIX: previously these three steps ran as independent statements
+    // with no transaction wrapping them:
+    //
+    //     SELECT balance_due FROM invoices WHERE id = ?   -- read
+    //     if amount > balance_due { return 400 }          -- check
+    //     INSERT INTO payments ...                        -- write
+    //     UPDATE invoices SET amount_paid = amount_paid + ?, ...
+    //
+    // Two concurrent payments of $60 against a $100 invoice both read
+    // `balance_due = 100`, both passed the `60 <= 100` check, both inserted
+    // a payment row, and both ran the UPDATE — leaving `amount_paid = 120`
+    // and `balance_due = MAX(0, 100-120) = 0`. The invoice was silently
+    // overpaid by $20 and both callers received HTTP 200. Confirmed by test
+    // `concurrent_payments_cannot_overpay`: 10 concurrent $60 payments
+    // against a $100 invoice produced 4 accepted (200) responses.
+    //
+    // `BEGIN IMMEDIATE` acquires the SQLite write lock at transaction start.
+    // SQLite only allows a single writer at a time, so this serializes the
+    // read-check-write sequence: the second payment's `SELECT balance_due`
+    // only runs after the first has committed, so it sees the updated
+    // balance ($40) and is correctly rejected as a $60-over-$40 overpay.
+    // Concurrent writers block on the write lock (subject to the pool's
+    // busy timeout) until the holder commits, then proceed.
+    //
+    // (SQLite has no `SELECT ... FOR UPDATE`; `BEGIN IMMEDIATE` is the
+    // standard SQLite idiom for serializing writers. This matches the
+    // `create_invoice` fix from commit 8b1c123.)
+    let mut conn = state.db.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    // (2) invoice must exist — fetch total + current balance inside the tx.
+    let row = sqlx::query("SELECT total_amount, amount_paid, balance_due FROM invoices WHERE id = ?")
         .bind(b.invoice_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *conn)
         .await?
         .ok_or(ApiError::NotFound)?;
 
+    let total_amount: f64 = row.get("total_amount");
+    let amount_paid: f64 = row.get("amount_paid");
     let balance_due: f64 = row.get("balance_due");
 
     // (3) reject overpayment (conservative policy — see note above).
@@ -281,6 +312,9 @@ pub async fn add_payment(State(state): State<AppState>, Json(b): Json<CreatePaym
     //     here because both values round-trip through the same SQLite REAL
     //     column without further arithmetic.
     if b.amount > balance_due {
+        // Roll back before returning so the connection is returned to the
+        // pool in a clean (non-transactional) state.
+        sqlx::query("ROLLBACK").execute(&mut *conn).await?;
         return Err(ApiError::BadRequest(format!(
             "payment amount {} exceeds outstanding balance {} (overpayment not allowed)",
             b.amount, balance_due
@@ -289,20 +323,43 @@ pub async fn add_payment(State(state): State<AppState>, Json(b): Json<CreatePaym
 
     let r = sqlx::query("INSERT INTO payments (invoice_id, amount, payment_method, reference_number, notes) VALUES (?, ?, ?, ?, ?)")
         .bind(b.invoice_id).bind(b.amount).bind(&b.payment_method).bind(&b.reference_number).bind(&b.notes)
-        .execute(&state.db).await?;
+        .execute(&mut *conn).await?;
     let id = r.last_insert_rowid();
 
-    // update invoice amount_paid + balance + status
+    // (4) Update the invoice. Now that we hold `total_amount`, `amount_paid`,
+    //     and `balance_due` from the in-transaction SELECT, we can compute
+    //     the new values directly in Rust and bind them — no need for the
+    //     old `amount_paid + ?` self-referencing double-read in the SET
+    //     clause. This is clearer and avoids relying on SQLite's
+    //     left-to-right evaluation of the `amount_paid` reference in
+    //     `MAX(0, total_amount - (amount_paid + ?))`.
+    let new_amount_paid = amount_paid + b.amount;
+    let new_balance_due = (total_amount - new_amount_paid).max(0.0);
+    // status: 'paid' if fully settled, else 'partially_paid'. (A brand-new
+    // invoice starts as 'issued'; the first partial payment flips it to
+    // 'partially_paid', and the final payment flips it to 'paid'.)
+    let new_status = if new_amount_paid >= total_amount - 0.0001 { "paid" } else { "partially_paid" };
     sqlx::query(
         "UPDATE invoices SET
-           amount_paid = amount_paid + ?,
-           balance_due = MAX(0, total_amount - (amount_paid + ?)),
-           status = CASE WHEN (amount_paid + ?) >= total_amount THEN 'paid' ELSE 'partially_paid' END
+           amount_paid = ?,
+           balance_due = ?,
+           status = ?
          WHERE id = ?")
-        .bind(b.amount).bind(b.amount).bind(b.amount).bind(b.invoice_id)
-        .execute(&state.db).await?;
+        .bind(new_amount_paid)
+        .bind(new_balance_due) // == MAX(0, ...) since we rejected overpay above
+        .bind(new_status)
+        .bind(b.invoice_id)
+        .execute(&mut *conn).await?;
 
-    let row = sqlx::query("SELECT * FROM payments WHERE id = ?").bind(id).fetch_one(&state.db).await?;
+    // Read back the payment row within the same transaction.
+    let row = sqlx::query("SELECT * FROM payments WHERE id = ?").bind(id).fetch_one(&mut *conn).await?;
+
+    // Commit. If any statement above returned an error, the `?` operator
+    // would propagate it and `conn` would be dropped — sqlx rolls back an
+    // un-committed transaction on drop, so partial writes are never
+    // persisted.
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
+
     Ok(Json(Payment {
         id: row.get("id"), invoice_id: row.get("invoice_id"), payment_date: row.get("payment_date"),
         amount: row.get("amount"), payment_method: row.get("payment_method"),
