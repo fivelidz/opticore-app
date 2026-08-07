@@ -140,10 +140,50 @@ pub async fn auto_import(State(state): State<AppState>) -> ApiResult<Json<serde_
 }
 
 /// Shared import logic used by both single-import and auto-import.
+///
+/// Wrapped in `BEGIN IMMEDIATE` with a status guard to close two concurrency
+/// hazards:
+///
+/// 1. **Double-import race (TOCTOU):** two concurrent calls on the same
+///    intake id (e.g. double-click on "Import", or concurrent single-import
+///    + auto-import) both SELECT the intake, both see status='new', both
+///    INSERT a patient, both mark it imported → duplicate patients created
+///    from one submission. The fix acquires the write lock up-front and
+///    re-checks the status inside the transaction; the second caller sees
+///    status='imported' and bails out with a clean 409.
+///
+/// 2. **Partial-failure inconsistency:** INSERT patient → INSERT appointment
+///    → UPDATE intake previously ran as separate statements. If the
+///    appointment INSERT failed (e.g. bad date), the patient row was left
+///    behind but the intake stayed 'new' — re-importing then created a
+///    duplicate patient. The transaction makes all three steps atomic: either
+///    all commit or all roll back.
 async fn import_one(state: &AppState, id: i64) -> ApiResult<()> {
+    let mut conn = state.db.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
     let row = sqlx::query("SELECT * FROM intake_submissions WHERE id = ?")
-        .bind(id).fetch_optional(&state.db).await?.ok_or(ApiError::NotFound)?;
+        .bind(id).fetch_optional(&mut *conn).await?;
+    let row = match row {
+        Some(r) => r,
+        None => {
+            sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+            return Err(ApiError::NotFound);
+        }
+    };
     let sub = row_to_intake(&row);
+
+    // Status guard: only 'new' submissions can be imported. If another
+    // concurrent call already imported (or archived/declined) this submission,
+    // reject cleanly. (Without the transaction this would be a TOCTOU.)
+    if sub.status != "new" {
+        sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+        return Err(ApiError::Conflict(format!(
+            "intake submission {} has already been processed (status: {})",
+            id,
+            sub.status.as_str()
+        )));
+    }
 
     let year = chrono::Utc::now().format("%Y");
     let mrn = format!("MOS-{}{:07}", year, rand::random::<u32>() % 1_000_000);
@@ -161,7 +201,7 @@ async fn import_one(state: &AppState, id: i64) -> ApiResult<()> {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(&mrn).bind(&sub.first_name).bind(&sub.last_name).bind(&dob)
         .bind(&sub.phone).bind(&sub.email).bind(&sub.address).bind(&sub.medicare_number)
-        .execute(&state.db).await?;
+        .execute(&mut *conn).await?;
     let pid = pr.last_insert_rowid();
 
     if let Some(date) = sub.preferred_date {
@@ -171,11 +211,12 @@ async fn import_one(state: &AppState, id: i64) -> ApiResult<()> {
             "INSERT INTO appointments (patient_id, appointment_type, appointment_date, duration_minutes, status, notes)
              VALUES (?, ?, ?, 60, 'scheduled', ?)")
             .bind(pid).bind(&atype).bind(&dt).bind(&sub.symptoms)
-            .execute(&state.db).await?;
+            .execute(&mut *conn).await?;
     }
 
     sqlx::query("UPDATE intake_submissions SET status = 'imported', matched_patient_id = ? WHERE id = ?")
-        .bind(pid).bind(id).execute(&state.db).await?;
+        .bind(pid).bind(id).execute(&mut *conn).await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(())
 }
 
@@ -454,13 +495,46 @@ pub async fn merge_into(
     State(state): State<AppState>,
     Path((id, patient_id)): Path<(i64, i64)>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Wrap the read-guard-write sequence in `BEGIN IMMEDIATE` with a status
+    // guard — same double-processing race fix as `import_one` and
+    // `approve_intake`. Two concurrent merge-into calls on the same intake id
+    // would both create an appointment and both mark it imported. The
+    // transaction + status guard ensures only the first succeeds; the second
+    // sees status='imported' and is rejected with 409.
+    let mut conn = state.db.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
     let row = sqlx::query("SELECT * FROM intake_submissions WHERE id = ?")
-        .bind(id).fetch_optional(&state.db).await?.ok_or(ApiError::NotFound)?;
+        .bind(id).fetch_optional(&mut *conn).await?;
+    let row = match row {
+        Some(r) => r,
+        None => {
+            sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+            return Err(ApiError::NotFound);
+        }
+    };
     let sub = row_to_intake(&row);
+
+    // Status guard: only 'new' submissions can be merged.
+    if sub.status != "new" {
+        sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+        return Err(ApiError::Conflict(format!(
+            "intake submission {} has already been processed (status: {})",
+            id,
+            sub.status.as_str()
+        )));
+    }
 
     // ensure target patient exists
     let prow = sqlx::query("SELECT * FROM patients WHERE id = ?")
-        .bind(patient_id).fetch_optional(&state.db).await?.ok_or(ApiError::NotFound)?;
+        .bind(patient_id).fetch_optional(&mut *conn).await?;
+    let prow = match prow {
+        Some(r) => r,
+        None => {
+            sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+            return Err(ApiError::NotFound);
+        }
+    };
 
     // --- update contact details where the record is missing info ---
     let mut updated_fields: Vec<String> = Vec::new();
@@ -473,7 +547,7 @@ pub async fn merge_into(
                 sqlx::query(concat!("UPDATE patients SET ", $col, " = ? WHERE id = ?"))
                     .bind($intake.as_deref())
                     .bind(patient_id)
-                    .execute(&state.db).await?;
+                    .execute(&mut *conn).await?;
                 updated_fields.push($col.to_string());
             }
         }};
@@ -493,13 +567,14 @@ pub async fn merge_into(
             "INSERT INTO appointments (patient_id, appointment_type, appointment_date, duration_minutes, status, notes)
              VALUES (?, ?, ?, 60, 'scheduled', ?)")
             .bind(patient_id).bind(&atype).bind(&dt).bind(&sub.symptoms)
-            .execute(&state.db).await?;
+            .execute(&mut *conn).await?;
         appointment_id = Some(ar.last_insert_rowid());
     }
 
     // --- mark intake imported + linked, clear the no-match flag ---
     sqlx::query("UPDATE intake_submissions SET status = 'imported', matched_patient_id = ?, claimed_no_match = 0 WHERE id = ?")
-        .bind(patient_id).bind(id).execute(&state.db).await?;
+        .bind(patient_id).bind(id).execute(&mut *conn).await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
 
     let mrn: String = prow.get("mrn");
     Ok(Json(serde_json::json!({

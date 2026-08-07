@@ -299,6 +299,9 @@ pub async fn approve_intake(
     // identical details so staff are warned about a possible duplicate. This is
     // ADVISORY: approval still proceeds (creating a new patient). To merge
     // instead, staff use the /match-check + /merge-into flow.
+    //
+    // These are pure reads (no mutation), so they run outside the write
+    // transaction below. They do not affect correctness of the guard.
     let exact_id = crate::routes::intake::exact_match_patient(
         &state,
         &info.first_name,
@@ -319,7 +322,47 @@ pub async fn approve_intake(
     )
     .await?;
 
-    // --- create patient (inlined from intake::import_one) ---
+    // --- create patient + appointment + mark imported (atomic) ---
+    //
+    // Wrap the multi-step write in `BEGIN IMMEDIATE` with a status guard to
+    // close two concurrency hazards (same fix as `intake::import_one`):
+    //
+    // 1. **Double-approve race (TOCTOU):** two concurrent approve calls on the
+    //    same intake id both SELECT the intake, both see status='new', both
+    //    INSERT a patient, both mark it imported → duplicate patients created
+    //    from one submission. The fix acquires the write lock up-front and
+    //    re-checks the status inside the transaction; the second caller sees
+    //    status='imported' and is rejected with 409.
+    // 2. **Partial-failure inconsistency:** INSERT patient → INSERT appointment
+    //    → UPDATE intake previously ran as separate statements. If any step
+    //    failed, earlier inserts were left behind but the intake stayed 'new'.
+    //    The transaction makes all steps atomic.
+    let mut conn = state.db.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    // Re-fetch the intake row inside the transaction and check its status.
+    let row = sqlx::query("SELECT * FROM intake_submissions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let row = match row {
+        Some(r) => r,
+        None => {
+            sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+            return Err(ApiError::NotFound);
+        }
+    };
+    let status: Option<String> = row.get("status");
+    if status.as_deref().unwrap_or("new") != "new" {
+        sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+        return Err(ApiError::Conflict(format!(
+            "intake submission {} has already been processed (status: {})",
+            id,
+            status.as_deref().unwrap_or("?")
+        )));
+    }
+
+    // --- create patient ---
     let year = chrono::Utc::now().format("%Y");
     let mrn = format!("MOS-{}{:07}", year, rand::random::<u32>() % 1_000_000);
     let pr = sqlx::query(
@@ -334,7 +377,7 @@ pub async fn approve_intake(
     .bind(&info.email)
     .bind(&info.address)
     .bind(&info.medicare_number)
-    .execute(&state.db)
+    .execute(&mut *conn)
     .await?;
     let pid = pr.last_insert_rowid();
 
@@ -359,7 +402,7 @@ pub async fn approve_intake(
         .bind(&atype)
         .bind(&dt)
         .bind(&info.symptoms)
-        .execute(&state.db)
+        .execute(&mut *conn)
         .await?;
         appointment_id = Some(ar.last_insert_rowid());
     }
@@ -368,8 +411,9 @@ pub async fn approve_intake(
     sqlx::query("UPDATE intake_submissions SET status = 'imported', matched_patient_id = ? WHERE id = ?")
         .bind(pid)
         .bind(id)
-        .execute(&state.db)
+        .execute(&mut *conn)
         .await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
 
     // --- queue confirmation notification ---
     let settings = load_settings(&state).await?;
