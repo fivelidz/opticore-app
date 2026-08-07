@@ -428,7 +428,7 @@ async fn users_create_returns_500_on_db_failure() {
         .post("/api/users")
         .auth(&t)
         .json(&serde_json::json!({
-            "username": "newuser", "email": "n@e.com", "password": "1234",
+            "username": "newuser", "email": "n@e.com", "password": "valid-pass-123",
             "role": "doctor", "first_name": "A", "last_name": "B"
         }))
         .send().await.expect("no panic");

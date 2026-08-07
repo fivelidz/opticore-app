@@ -76,6 +76,32 @@ pub fn verify_password(plain: &str, hash: &str) -> bool {
         .is_ok()
 }
 
+// ---------------------------------------------------------------------------
+// Password policy
+// ---------------------------------------------------------------------------
+
+/// Minimum password length. OWASP / NIST SP 800-63B recommend a minimum of 8
+/// characters. The old code only required 4, which is trivially brute-forced
+/// and far below any modern baseline — unacceptable for a medical PMS handling
+/// patient health data.
+pub const MIN_PASSWORD_LEN: usize = 8;
+
+/// Validate a password against the policy. Returns `Ok(())` if it passes, or
+/// a user-facing error message if it fails.
+///
+/// Centralized here so every password-setting surface (user creation, user
+/// update, change-password) enforces the SAME rule — no drift. Each call site
+/// returns the message inside an `ApiError::BadRequest`.
+pub fn validate_password(pw: &str) -> Result<(), String> {
+    if pw.len() < MIN_PASSWORD_LEN {
+        return Err(format!(
+            "Password must be at least {} characters",
+            MIN_PASSWORD_LEN
+        ));
+    }
+    Ok(())
+}
+
 /// Claims attached to the request after successful auth.
 #[derive(Clone, Debug)]
 pub struct AuthUser {

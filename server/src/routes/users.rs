@@ -37,9 +37,9 @@ pub async fn create(State(state): State<AppState>, Json(b): Json<CreateUser>) ->
     if !["admin", "doctor", "nurse", "receptionist", "readonly"].contains(&role) {
         return Err(ApiError::BadRequest("Invalid role".into()));
     }
-    if b.password.len() < 4 {
-        return Err(ApiError::BadRequest("Password must be at least 4 characters".into()));
-    }
+    // Enforce the centralized password policy (>= 8 chars). The old code only
+    // required 4 characters — far too weak for a medical PMS.
+    crate::auth::validate_password(&b.password).map_err(ApiError::BadRequest)?;
     let hash = crate::auth::hash_password(&b.password)?;
     let r = sqlx::query(
         "INSERT INTO users (username, email, password_hash, role, first_name, last_name, is_active)
@@ -65,9 +65,9 @@ pub async fn update(State(state): State<AppState>, Path(id): Path<i64>, Json(b):
         }
     }
     if let Some(ref pw) = b.password {
-        if pw.len() < 4 {
-            return Err(ApiError::BadRequest("Password too short".into()));
-        }
+        // Enforce the centralized password policy (>= 8 chars). The old code
+        // only required 4 characters — far too weak for a medical PMS.
+        crate::auth::validate_password(pw).map_err(ApiError::BadRequest)?;
     }
 
     // Wrap the read-guard-write sequence in a single `BEGIN IMMEDIATE`

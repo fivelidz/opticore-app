@@ -22,9 +22,10 @@ pub async fn change_password(
     axum::Extension(AuthUser { id, .. }): axum::Extension<AuthUser>,
     Json(body): Json<ChangePasswordRequest>,
 ) -> ApiResult<Json<shared::MessageResponse>> {
-    if body.new_password.len() < 4 {
-        return Err(ApiError::BadRequest("New password must be at least 4 characters".into()));
-    }
+    // Enforce the centralized password policy (>= 8 chars). The old code only
+    // required 4 characters — far too weak for a medical PMS.
+    crate::auth::validate_password(&body.new_password)
+        .map_err(ApiError::BadRequest)?;
     if body.current_password == body.new_password {
         return Err(ApiError::BadRequest("New password must be different".into()));
     }
