@@ -51,6 +51,14 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<MsgQuery>) -> A
 
 /// PUBLIC: receive a message (from website contact form, webhook, etc.)
 pub async fn receive(State(state): State<AppState>, Json(b): Json<CreateMessage>) -> ApiResult<axum::response::Response> {
+    // `body` is TEXT NOT NULL, but that still accepts the empty string. A
+    // message with no content is useless and clutters the inbox. Reject empty
+    // / whitespace-only bodies before insert.
+    if b.body.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "message body must not be empty".into(),
+        ));
+    }
     let r = sqlx::query(
         "INSERT INTO messages (channel, from_name, from_contact, subject, body, thread_id)
          VALUES (?, ?, ?, ?, ?, ?)")

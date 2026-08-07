@@ -306,3 +306,67 @@ async fn submit_intake_with_whitespace_only_name_is_rejected() {
         "whitespace-only names must be 400"
     );
 }
+
+// =====================================================================
+// Messages: receive must reject an empty body
+// =====================================================================
+//
+// `body` is TEXT NOT NULL, but that still accepts the empty string. A message
+// with no content is useless and clutters the inbox.
+
+#[tokio::test]
+async fn receive_message_with_empty_body_is_rejected() {
+    let app = TestApp::spawn().await;
+    let body = serde_json::json!({
+        "channel": "website",
+        "body": "",
+    });
+    let resp = app
+        .post("/api/messages/receive")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "message with empty body must be 400, not 201"
+    );
+}
+
+#[tokio::test]
+async fn receive_message_with_whitespace_body_is_rejected() {
+    let app = TestApp::spawn().await;
+    let body = serde_json::json!({
+        "channel": "website",
+        "body": "   \n\t  ",
+    });
+    let resp = app
+        .post("/api/messages/receive")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "message with whitespace-only body must be 400"
+    );
+}
+
+#[tokio::test]
+async fn receive_message_with_valid_body_is_accepted() {
+    // Regression guard: a normal message must still be accepted.
+    let app = TestApp::spawn().await;
+    let body = serde_json::json!({
+        "channel": "website",
+        "body": "Hello, I'd like to book an appointment.",
+    });
+    let resp = app
+        .post("/api/messages/receive")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "valid message should succeed");
+}
