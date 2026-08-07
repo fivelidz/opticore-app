@@ -11,8 +11,8 @@
 //! What we characterize here:
 //!   1. Insert with a VALID appointment_id succeeds and the link is stored.
 //!   2. Insert with a NONEXISTENT appointment_id is rejected by the FK
-//!      (surfaces as HTTP 500 — the error mapper only special-cases UNIQUE
-//!      violations to 409; FK violations fall through to Internal).
+//!      (surfaces as HTTP 400 Bad Request — the error mapper maps FK
+//!      violations to BadRequest so clients get an actionable error).
 //!   3. Deleting the appointment NULLS the appointment_id on the dependent
 //!      row (SET NULL) — the invoice/photo itself is preserved.
 //!
@@ -111,10 +111,8 @@ async fn invoice_with_nonexistent_appointment_id_is_rejected_by_fk() {
     let pid = create_patient(&app, &t, "InvBad").await;
 
     // 9_999_999 does not exist in appointments -> FK violation.
-    // The error mapper (error.rs) only special-cases UNIQUE violations to 409;
-    // an FK violation falls through to ApiError::Internal -> HTTP 500. This
-    // test characterizes that current behaviour. (A future improvement could
-    // map FK violations to 400 Bad Request.)
+    // The error mapper (error.rs) maps FK violations to 400 Bad Request so
+    // clients get an actionable error instead of an opaque 500.
     let body = serde_json::json!({
         "patient_id": pid,
         "appointment_id": 9_999_999,
@@ -124,7 +122,7 @@ async fn invoice_with_nonexistent_appointment_id_is_rejected_by_fk() {
         ],
     });
     let resp = app.post("/api/billing/invoices").auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 500, "FK violation on appointment_id surfaces as 500");
+    assert_eq!(resp.status(), 400, "FK violation on appointment_id surfaces as 400 Bad Request");
 }
 
 #[tokio::test]
@@ -209,7 +207,7 @@ async fn photo_with_nonexistent_appointment_id_is_rejected_by_fk() {
     // The patient-level upload route does NOT pre-validate appointment_id
     // (unlike the appointment-scoped route, which 404s on a missing appt).
     // So a bad appointment_id reaches the INSERT and trips the new FK ->
-    // sqlx::Error::Database(foreign_key_violation) -> ApiError::Internal -> 500.
+    // sqlx::Error::Database(foreign_key_violation) -> ApiError::BadRequest -> 400.
     let body = serde_json::json!({
         "category": "document",
         "filename": "tiny.png",
@@ -221,7 +219,7 @@ async fn photo_with_nonexistent_appointment_id_is_rejected_by_fk() {
     let resp = app
         .post(&format!("/api/patients/{pid}/photos"))
         .auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 500, "FK violation on appointment_id surfaces as 500");
+    assert_eq!(resp.status(), 400, "FK violation on appointment_id surfaces as 400 Bad Request");
 }
 
 #[tokio::test]
