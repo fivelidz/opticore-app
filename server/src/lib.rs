@@ -12,8 +12,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::{
     middleware,
+    response::IntoResponse,
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -128,9 +129,62 @@ pub fn build_app(state: AppState) -> Router {
         .merge(public_router())
         .merge(protected_router(state.clone()))
         .merge(admin_router(state.clone()))
+        .layer(middleware::from_fn(normalize_error_response))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Middleware that normalizes error responses to the app's JSON error shape.
+///
+/// axum's built-in extractors (`Json`, `Path`, `Query`) produce their own
+/// rejection responses on bad input — plain text bodies with a 400/404/422
+/// status. This breaks API consistency: every handler-driven error path
+/// returns `{"error": "..."}` via `ApiError::into_response()`, but extractor
+/// rejections return raw text. API clients that parse the `error` field then
+/// fail on these responses.
+///
+/// This middleware inspects every response: if the status is 4xx/5xx AND the
+/// content-type is NOT already `application/json`, it re-wraps the body as
+/// `{"error": "<original body text>"}` with `application/json`. Responses that
+/// are already JSON (the normal `ApiError` path) pass through unchanged.
+async fn normalize_error_response(
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let resp = next.run(req).await;
+    let status = resp.status();
+
+    // Only re-wrap client/server error responses (4xx/5xx). Success responses
+    // (2xx/3xx) pass through untouched.
+    if !status.is_client_error() && !status.is_server_error() {
+        return resp;
+    }
+
+    // If the response is already JSON, leave it alone (the normal ApiError
+    // path already produces the right shape).
+    let already_json = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.starts_with("application/json"))
+        .unwrap_or(false);
+    if already_json {
+        return resp;
+    }
+
+    // Extract the original body text (axum extractor rejections put a
+    // human-readable message in the body, e.g. "Failed to deserialize the JSON
+    // body into the target type: ...").
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap_or_default();
+    let msg = String::from_utf8_lossy(&bytes);
+    let body = serde_json::json!({ "error": msg });
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        Json(body),
+    )
+        .into_response()
 }
 
 /// Start the HTTP server. Blocks until the server stops.
