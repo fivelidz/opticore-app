@@ -155,6 +155,18 @@ pub async fn import_data(
                                 if let Some(i) = n.as_i64() { q.bind(i) }
                                 else { q.bind(n.as_f64().unwrap_or(0.0)) }
                             }
+                            // BLOB round-trip: export tags binary columns as
+                            // "b64:<base64>"; decode back to raw bytes on import
+                            // so SQLite stores them as BLOB, not text. Strings
+                            // without the tag bind as plain TEXT.
+                            serde_json::Value::String(s) if s.starts_with("b64:") => {
+                                match base64_decode(&s[4..]) {
+                                    Ok(bytes) => q.bind(bytes),
+                                    // malformed b64: tag — bind the original
+                                    // string verbatim rather than dropping the row.
+                                    Err(_) => q.bind(s),
+                                }
+                            }
                             serde_json::Value::String(s) => q.bind(s),
                             _ => q.bind(v.to_string()),
                         };
@@ -203,9 +215,33 @@ fn row_to_json(row: &sqlx::sqlite::SqliteRow) -> serde_json::Value {
                 row.try_get::<Option<String>, _>(name).unwrap_or(None)
                     .map(serde_json::Value::from).unwrap_or(serde_json::Value::Null)
             }
+            "BLOB" => {
+                // BLOB columns hold raw bytes that may not be valid UTF-8. The
+                // old catch-all tried Option<String> and silently dropped
+                // binary blobs (data loss on export). Encode as base64 with a
+                // "b64:" tag so importers can distinguish BLOB-origin strings
+                // from plain TEXT. NULL stays JSON null.
+                match row.try_get::<Option<Vec<u8>>, _>(name) {
+                    Ok(Some(bytes)) => {
+                        serde_json::Value::String(format!("b64:{}", base64_encode(&bytes)))
+                    }
+                    _ => serde_json::Value::Null,
+                }
+            }
             _ => {
-                row.try_get::<Option<String>, _>(name).unwrap_or(None)
-                    .map(serde_json::Value::from).unwrap_or(serde_json::Value::Null)
+                // Unknown type (e.g. DATETIME, DATE, NUMERIC): SQLite stores
+                // these as TEXT, so Option<String> round-trips correctly. If it
+                // fails (genuinely binary value in an untyped column), fall
+                // back to BLOB-style base64 rather than silently emitting null.
+                match row.try_get::<Option<String>, _>(name) {
+                    Ok(Some(s)) => serde_json::Value::String(s),
+                    _ => match row.try_get::<Option<Vec<u8>>, _>(name) {
+                        Ok(Some(bytes)) => {
+                            serde_json::Value::String(format!("b64:{}", base64_encode(&bytes)))
+                        }
+                        _ => serde_json::Value::Null,
+                    },
+                }
             }
         };
         obj.insert(name.to_string(), val);
@@ -555,5 +591,173 @@ mod tests {
             let pw: String = (0..rng.gen_range(0..32)).map(|_| rng.gen_range(b' '..=b'~') as char).collect();
             assert_round_trip(&s, &pw);
         }
+    }
+
+    // ---- row_to_json SQL type coverage ----
+
+    /// Helper: create an in-memory SQLite pool with a single typed test table,
+    /// insert one row, and return the rows so the caller can pass them through
+    /// `row_to_json`.
+    async fn typed_rows(sql_create: &str, insert: &str) -> Vec<sqlx::sqlite::SqliteRow> {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory db");
+        sqlx::query(sql_create).execute(&pool).await.expect("create table");
+        sqlx::query(insert).execute(&pool).await.expect("insert row");
+        let rows: Vec<sqlx::sqlite::SqliteRow> =
+            sqlx::query("SELECT * FROM typed").fetch_all(&pool).await.expect("select");
+        // keep pool alive until here; rows are detached (owned by SqliteRow).
+        drop(pool);
+        rows
+    }
+
+    /// INTEGER → JSON number.
+    #[tokio::test]
+    async fn row_to_json_integer_column() {
+        let rows = typed_rows(
+            "CREATE TABLE typed (v INTEGER)",
+            "INSERT INTO typed (v) VALUES (42)",
+        )
+        .await;
+        let v = row_to_json(&rows[0]);
+        assert_eq!(v["v"], serde_json::json!(42), "INTEGER should be a JSON number");
+        assert!(v["v"].is_i64(), "INTEGER should deserialize as i64");
+    }
+
+    /// NULL INTEGER → JSON null (not 0).
+    #[tokio::test]
+    async fn row_to_json_null_integer_is_json_null() {
+        let rows = typed_rows(
+            "CREATE TABLE typed (v INTEGER)",
+            "INSERT INTO typed (v) VALUES (NULL)",
+        )
+        .await;
+        let v = row_to_json(&rows[0]);
+        assert!(v["v"].is_null(), "NULL should be JSON null, not 0");
+    }
+
+    /// REAL → JSON number (f64).
+    #[tokio::test]
+    async fn row_to_json_real_column() {
+        let rows = typed_rows(
+            "CREATE TABLE typed (v REAL)",
+            "INSERT INTO typed (v) VALUES (3.14)",
+        )
+        .await;
+        let v = row_to_json(&rows[0]);
+        assert_eq!(v["v"], serde_json::json!(3.14), "REAL should be a JSON float");
+        assert!(v["v"].is_f64(), "REAL should deserialize as f64");
+    }
+
+    /// TEXT → JSON string.
+    #[tokio::test]
+    async fn row_to_json_text_column() {
+        let rows = typed_rows(
+            "CREATE TABLE typed (v TEXT)",
+            "INSERT INTO typed (v) VALUES ('hello')",
+        )
+        .await;
+        let v = row_to_json(&rows[0]);
+        assert_eq!(v["v"], serde_json::json!("hello"), "TEXT should be a JSON string");
+    }
+
+    /// DATETIME → SQLite stores these as TEXT ("YYYY-MM-DD HH:MM:SS"). The
+    /// catch-all arm reads them as String, which round-trips correctly. This
+    /// test documents and locks that behavior.
+    #[tokio::test]
+    async fn row_to_json_datetime_column_is_text() {
+        let rows = typed_rows(
+            "CREATE TABLE typed (v DATETIME)",
+            "INSERT INTO typed (v) VALUES ('2024-01-15 09:30:00')",
+        )
+        .await;
+        let v = row_to_json(&rows[0]);
+        // DATETIME is not in the explicit match arms; it falls through to the
+        // catch-all which tries Option<String>. SQLite stores it as TEXT, so
+        // this succeeds and yields the string verbatim.
+        assert_eq!(v["v"], serde_json::json!("2024-01-15 09:30:00"));
+        assert!(v["v"].is_string(), "DATETIME should surface as a JSON string");
+    }
+
+    /// BLOB → the catch-all arm tries Option<String>, which FAILS for raw
+    /// binary BLOB data (it's not valid UTF-8). The current code silently
+    /// swallows the error via `.unwrap_or(None)` and emits JSON null —
+    /// **data loss on export**. This test documents the current (buggy)
+    /// behavior so the fix below is verifiable, then asserts the FIXED
+    /// behavior: BLOBs are base64-encoded into a JSON string.
+    #[tokio::test]
+    async fn row_to_json_blob_column_is_base64_encoded() {
+        // Raw bytes that are NOT valid UTF-8 (0xff, 0xfe, ...).
+        let blob_bytes: Vec<u8> = vec![0xff, 0xfe, 0x00, 0x41, 0x42, 0xff];
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect");
+        sqlx::query("CREATE TABLE typed (v BLOB)")
+            .execute(&pool)
+            .await
+            .expect("create");
+        sqlx::query("INSERT INTO typed (v) VALUES (?)")
+            .bind(&blob_bytes[..])
+            .execute(&pool)
+            .await
+            .expect("insert");
+        let rows: Vec<sqlx::sqlite::SqliteRow> =
+            sqlx::query("SELECT * FROM typed").fetch_all(&pool).await.expect("select");
+        drop(pool);
+
+        let v = row_to_json(&rows[0]);
+        // FIXED behavior: BLOB is base64-encoded into a JSON string with a
+        // "b64:" prefix so importers can distinguish it from plain TEXT.
+        let s = v["v"].as_str().expect("BLOB should be a base64 JSON string");
+        assert!(s.starts_with("b64:"), "BLOB should be tagged b64:, got: {s}");
+        let b64 = &s[4..];
+        let decoded = base64_decode(b64).expect("BLOB payload should be valid base64");
+        assert_eq!(decoded, blob_bytes, "decoded BLOB must equal the original bytes");
+    }
+
+    /// BLOB that happens to be valid UTF-8 should still be tagged b64: (so the
+    /// importer knows it came from a BLOB column, not TEXT). This guards against
+    /// a regression where valid-UTF-8 BLOBs silently pass through as strings
+    /// and lose their type marker.
+    #[tokio::test]
+    async fn row_to_json_utf8_blob_is_still_base64_tagged() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect");
+        sqlx::query("CREATE TABLE typed (v BLOB)")
+            .execute(&pool)
+            .await
+            .expect("create");
+        sqlx::query("INSERT INTO typed (v) VALUES (?)")
+            .bind(&b"hello"[..])
+            .execute(&pool)
+            .await
+            .expect("insert");
+        let rows: Vec<sqlx::sqlite::SqliteRow> =
+            sqlx::query("SELECT * FROM typed").fetch_all(&pool).await.expect("select");
+        drop(pool);
+        let v = row_to_json(&rows[0]);
+        let s = v["v"].as_str().expect("BLOB should be a string");
+        assert!(s.starts_with("b64:"), "even UTF-8 BLOBs must be tagged: {s}");
+        let decoded = base64_decode(&s[4..]).expect("decode");
+        assert_eq!(decoded, b"hello");
+    }
+
+    /// NULL BLOB → JSON null (not "b64:").
+    #[tokio::test]
+    async fn row_to_json_null_blob_is_json_null() {
+        let rows = typed_rows(
+            "CREATE TABLE typed (v BLOB)",
+            "INSERT INTO typed (v) VALUES (NULL)",
+        )
+        .await;
+        let v = row_to_json(&rows[0]);
+        assert!(v["v"].is_null(), "NULL BLOB should be JSON null");
     }
 }

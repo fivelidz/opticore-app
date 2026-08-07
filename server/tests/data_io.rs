@@ -281,3 +281,83 @@ async fn data_endpoints_require_admin() {
         401
     );
 }
+
+/// End-to-end BLOB round-trip through export → import.
+///
+/// The schema has no BLOB columns today, but `row_to_json` must handle them
+/// correctly for future schema versions (and for snapshots produced by older
+/// versions that did use BLOBs). Since the export endpoint only dumps a
+/// hardcoded table list, we `ALTER TABLE` an existing exported table
+/// (`patient_photos`) to add a BLOB column, insert binary data, then export
+/// and import into a fresh DB and verify the bytes survive.
+///
+/// Before the fix, the BLOB was silently dropped to JSON null on export, so
+/// the imported row would have NULL in the BLOB column. With the b64: tag,
+/// the bytes survive the full round-trip.
+#[tokio::test]
+async fn blob_column_survives_export_import_round_trip() {
+    let app_a = TestApp::spawn().await;
+    let ta = token(&app_a).await;
+
+    // Add a BLOB column to patient_photos and insert a row with non-UTF-8 bytes.
+    let blob_bytes: Vec<u8> = vec![0xff, 0x00, 0xfe, 0x41, 0x42, 0x43, 0xff, 0x01];
+    sqlx::query("ALTER TABLE patient_photos ADD COLUMN thumb_blob BLOB")
+        .execute(&app_a.state.db)
+        .await
+        .unwrap();
+    // patient_photos requires patient_id (FK). Use patient 1 (seeded).
+    sqlx::query(
+        "INSERT INTO patient_photos (patient_id, category, filename, data_base64, thumb_blob) \
+         VALUES (1, 'document', 'test.png', 'b64data', ?)",
+    )
+    .bind(&blob_bytes[..])
+    .execute(&app_a.state.db)
+    .await
+    .unwrap();
+
+    // Export A (unencrypted so we can inspect the snapshot).
+    let resp = app_a
+        .post("/api/data/export").auth(&ta).json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let snapshot_str = body_json(resp).await["snapshot"].as_str().unwrap().to_string();
+
+    // Inspect the exported snapshot: the BLOB should be present as "b64:...".
+    let snap: serde_json::Value = serde_json::from_str(&snapshot_str).unwrap();
+    let photos = snap["data"]["patient_photos"].as_array().expect("patient_photos exported");
+    let our_row = photos
+        .iter()
+        .find(|r| r.get("filename").and_then(|v| v.as_str()) == Some("test.png"))
+        .expect("our inserted row should be in the export");
+    let exported_blob = our_row["thumb_blob"].as_str().expect("thumb_blob is a string");
+    assert!(
+        exported_blob.starts_with("b64:"),
+        "exported BLOB should be tagged b64:, got: {exported_blob}"
+    );
+
+    // Fresh app B with the same BLOB column added.
+    let app_b = TestApp::spawn().await;
+    let tb = token(&app_b).await;
+    sqlx::query("ALTER TABLE patient_photos ADD COLUMN thumb_blob BLOB")
+        .execute(&app_b.state.db)
+        .await
+        .unwrap();
+
+    // Import A's snapshot into B (merge mode).
+    let resp = app_b
+        .post("/api/data/import")
+        .auth(&tb)
+        .json(&serde_json::json!({ "snapshot": snapshot_str, "mode": "merge" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Read the BLOB back from B and verify byte-for-byte equality.
+    let row = sqlx::query("SELECT thumb_blob FROM patient_photos WHERE filename = 'test.png'")
+        .fetch_one(&app_b.state.db)
+        .await
+        .unwrap();
+    use sqlx::Row;
+    let recovered: Vec<u8> = row.get::<Vec<u8>, _>("thumb_blob");
+    assert_eq!(recovered, blob_bytes, "BLOB bytes must survive export→import round-trip");
+}
