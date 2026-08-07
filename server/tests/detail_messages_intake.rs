@@ -244,3 +244,65 @@ async fn list_intake_returns_submissions() {
     let v = body_json(resp).await;
     assert!(v.as_array().unwrap().len() >= 1);
 }
+
+// ---------- Intake validation (session 10) ----------
+
+#[tokio::test]
+async fn submit_intake_with_empty_first_name_is_rejected() {
+    // first_name is a required field (non-Option in CreateIntake), but the
+    // empty string still deserializes. A nameless intake submission is
+    // useless to staff. Reject it.
+    let app = TestApp::spawn().await;
+    let body = serde_json::json!({
+        "first_name": "", "last_name": "Nonempty",
+    });
+    let resp = app
+        .post("/api/intake/submit")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "empty first_name must be 400, not 201"
+    );
+}
+
+#[tokio::test]
+async fn submit_intake_with_empty_last_name_is_rejected() {
+    let app = TestApp::spawn().await;
+    let body = serde_json::json!({
+        "first_name": "Nonempty", "last_name": "",
+    });
+    let resp = app
+        .post("/api/intake/submit")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "empty last_name must be 400, not 201"
+    );
+}
+
+#[tokio::test]
+async fn submit_intake_with_whitespace_only_name_is_rejected() {
+    let app = TestApp::spawn().await;
+    let body = serde_json::json!({
+        "first_name": "   ", "last_name": "  \t ",
+    });
+    let resp = app
+        .post("/api/intake/submit")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "whitespace-only names must be 400"
+    );
+}

@@ -192,3 +192,70 @@ async fn create_patient_missing_required_field_is_rejected() {
     let resp = app.post("/api/patients").auth(&t).json(&body).send().await.unwrap();
     assert_eq!(resp.status(), 422);
 }
+
+// ---------- Patient name validation (session 10) ----------
+
+#[tokio::test]
+async fn create_patient_with_empty_first_name_is_rejected() {
+    // first_name is required (non-Option), but the empty string still
+    // deserializes. A patient record with no first name is useless.
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let body = serde_json::json!({
+        "first_name": "", "last_name": "Nonempty", "date_of_birth": "1990-01-01",
+    });
+    let resp = app
+        .post("/api/patients")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "empty first_name must be 400, not 201"
+    );
+}
+
+#[tokio::test]
+async fn create_patient_with_empty_last_name_is_rejected() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let body = serde_json::json!({
+        "first_name": "Nonempty", "last_name": "", "date_of_birth": "1990-01-01",
+    });
+    let resp = app
+        .post("/api/patients")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "empty last_name must be 400, not 201"
+    );
+}
+
+#[tokio::test]
+async fn create_patient_with_whitespace_only_name_is_rejected() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let body = serde_json::json!({
+        "first_name": "  \t ", "last_name": "  ", "date_of_birth": "1990-01-01",
+    });
+    let resp = app
+        .post("/api/patients")
+        .auth(&t)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "whitespace-only names must be 400"
+    );
+}

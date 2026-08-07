@@ -45,6 +45,14 @@ fn row_to_intake(r: &sqlx::sqlite::SqliteRow) -> IntakeSubmission {
 
 /// PUBLIC: submit an intake form. No auth required.
 pub async fn submit(State(state): State<AppState>, Json(b): Json<CreateIntake>) -> ApiResult<axum::response::Response> {
+    // first_name / last_name are required (non-Option) but the empty string
+    // still deserializes. A nameless intake submission is useless to staff
+    // and clutters the review queue. Reject empty/whitespace-only names.
+    if b.first_name.trim().is_empty() || b.last_name.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "first_name and last_name must not be empty".into(),
+        ));
+    }
     // If the patient claims to be a returning/existing patient, check whether an
     // exact record actually exists. If not, flag the submission so staff see
     // "claims to be existing patient — no record found".

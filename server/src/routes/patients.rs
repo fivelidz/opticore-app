@@ -88,6 +88,14 @@ pub async fn create(
     State(state): State<AppState>,
     Json(body): Json<CreatePatient>,
 ) -> ApiResult<axum::response::Response> {
+    // first_name / last_name are required (non-Option) but the empty string
+    // still deserializes. A patient record with no name is useless and breaks
+    // patient-matching/listing. Reject empty/whitespace-only names.
+    if body.first_name.trim().is_empty() || body.last_name.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "first_name and last_name must not be empty".into(),
+        ));
+    }
     let mrn = body.mrn.clone().unwrap_or_else(gen_mrn);
 
     // Retry on MRN collision (up to 3 attempts).
