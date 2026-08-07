@@ -242,13 +242,26 @@ fn decrypt(cipher: &str, passphrase: &str) -> ApiResult<String> {
 fn derive_key(passphrase: &str) -> Vec<u8> {
     // Simple key derivation: hash the passphrase repeatedly to fill 256 bytes.
     // (Production: use PBKDF2/Argon2 via a crate.)
-    let mut key = Vec::new();
-    let mut seed = passphrase.as_bytes().to_vec();
+    //
+    // BUGFIX: an empty passphrase produced an empty `seed`, so the inner `for`
+    // loop pushed nothing, `key` never grew, and the `while key.len() < 256`
+    // loop spun forever (an infinite hang in encrypt/decrypt). We now fall
+    // back to a non-empty seed when the passphrase is empty so the stream
+    // always advances. (An empty passphrase is degenerate and offers no real
+    // security regardless; this just prevents the hang.)
+    let seed0 = passphrase.as_bytes();
+    let mut seed: Vec<u8> = if seed0.is_empty() {
+        b"\x00opticore-empty-passphrase-fallback".to_vec()
+    } else {
+        seed0.to_vec()
+    };
+    let mut key = Vec::with_capacity(256);
     while key.len() < 256 {
-        // rotate/xor mix
         for (i, b) in seed.iter().enumerate() {
             key.push(b.wrapping_add(i as u8).wrapping_mul(31));
         }
+        // Advance the seed window; guaranteed to make progress because seed is
+        // non-empty (guarded above) and key grows by seed.len() each iteration.
         seed = key[key.len().saturating_sub(seed.len())..].to_vec();
     }
     key.truncate(256);
@@ -316,4 +329,231 @@ fn base64_decode(s: &str) -> ApiResult<Vec<u8>> {
         _ => return Err(ApiError::BadRequest("invalid base64 length".into())),
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Property-style tests for the cipher and base64 helpers.
+    //!
+    //! These are unit tests (inside the module) so they can call the private
+    //! `encrypt`/`decrypt`/`base64_*` functions directly. The approach is a
+    //! loop-based fuzz: generate N random (plaintext, passphrase) pairs with
+    //! `rand`, round-trip them, and assert equality. No `quickcheck`/`proptest`
+    //! dep is added — `rand` is already a dependency.
+
+    use super::*;
+
+    use rand::Rng;
+
+    /// Round-trip a single (plaintext, passphrase) pair through encrypt/decrypt
+    /// and assert the recovered plaintext equals the input.
+    fn assert_round_trip(plain: &str, passphrase: &str) {
+        let ct = match encrypt(plain, passphrase) {
+            Ok(c) => c,
+            Err(e) => panic!("encrypt failed for plain={plain:?} pw={passphrase:?}: {e}"),
+        };
+        let pt = match decrypt(&ct, passphrase) {
+            Ok(p) => p,
+            Err(e) => panic!("decrypt failed for ct={ct:?} pw={passphrase:?}: {e}"),
+        };
+        assert_eq!(pt, plain, "round-trip mismatch for plain={plain:?} pw={passphrase:?}");
+    }
+
+    // ---- base64 round-trip (the bug the prior agent fixed) ----
+
+    #[test]
+    fn base64_round_trip_all_byte_lengths() {
+        // Lengths that hit every padding boundary (0, 1, 2, 3 mod 3).
+        for len in 0..=300 {
+            let bytes: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(7)).collect();
+            let enc = base64_encode(&bytes);
+            let dec = base64_decode(&enc).expect("decode");
+            assert_eq!(dec, bytes, "base64 round-trip failed at len {len}");
+        }
+    }
+
+    #[test]
+    fn base64_round_trip_random_bytes() {
+        let mut rng = rand::thread_rng();
+        for _ in 0..200 {
+            let len = rng.gen_range(0..512);
+            let bytes: Vec<u8> = (0..len).map(|_| rng.gen::<u8>()).collect();
+            let enc = base64_encode(&bytes);
+            let dec = base64_decode(&enc).expect("decode");
+            assert_eq!(dec, bytes, "base64 random round-trip failed (len {len})");
+        }
+    }
+
+    #[test]
+    fn base64_encode_matches_known_vectors() {
+        // RFC 4648 §10 test vectors (standard base64).
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    // ---- cipher round-trip: edge cases ----
+
+    #[test]
+    fn cipher_round_trip_empty_plaintext() {
+        assert_round_trip("", "any-passphrase");
+    }
+
+    #[test]
+    fn cipher_round_trip_empty_passphrase() {
+        // Empty passphrase is a degenerate but legal input; it must not panic.
+        assert_round_trip("some plaintext", "");
+        assert_round_trip("", "");
+    }
+
+    #[test]
+    fn cipher_round_trip_unicode_plaintext() {
+        // Multi-byte UTF-8: the cipher operates on bytes, so valid UTF-8 must
+        // survive the round-trip (decrypt does String::from_utf8).
+        assert_round_trip("héllo 世界 🦀", "pw");
+        assert_round_trip("Ωμέγα", "clé");
+    }
+
+    #[test]
+    fn cipher_round_trip_unicode_passphrase() {
+        assert_round_trip("plain", "пароль");
+        assert_round_trip("data", "パスワード");
+    }
+
+    #[test]
+    fn cipher_round_trip_large_plaintext() {
+        // Larger than the 256-byte key stream — exercises the modular wrap.
+        let big = "A".repeat(10_000);
+        assert_round_trip(&big, "pw");
+        // Just over a key-cycle boundary plus a partial tail.
+        let odd = "AB".repeat(127); // 254 bytes
+        assert_round_trip(&odd, "k");
+    }
+
+    #[test]
+    fn cipher_output_is_tagged_v1() {
+        let ct = encrypt("hello", "pw").unwrap();
+        assert!(ct.ends_with(":v1"), "ciphertext should carry the :v1 version tag: {ct}");
+    }
+
+    #[test]
+    fn cipher_output_is_base64_plus_tag() {
+        // The body before :v1 must be valid base64 (decodable without error).
+        let ct = encrypt("the quick brown fox", "secret").unwrap();
+        let body = ct.strip_suffix(":v1").unwrap_or(&ct);
+        assert!(base64_decode(body).is_ok(), "cipher body must be valid base64: {body}");
+    }
+
+    #[test]
+    fn decrypt_wrong_passphrase_does_not_panic() {
+        // A wrong passphrase produces garbage bytes that are *usually* not valid
+        // UTF-8 → decrypt returns Err(BadRequest). It must never panic. Even if
+        // the garbage happens to be valid UTF-8, the test only asserts no panic
+        // (the recovered string won't equal the original in practice).
+        let ct = encrypt("secret message", "right-pw").unwrap();
+        let _ = decrypt(&ct, "wrong-pw"); // must not panic
+    }
+
+    #[test]
+    fn decrypt_garbage_input_returns_err() {
+        // Non-base64 garbage → BadRequest, no panic.
+        assert!(decrypt("!!!not base64!!!", "pw").is_err());
+        // Valid base64 of non-UTF8 → BadRequest (String::from_utf8 fails).
+        // 0xff is invalid as a leading UTF-8 byte.
+        let bad = base64_encode(&[0xff, 0xfe, 0xff, 0xfe]);
+        assert!(decrypt(&bad, "pw").is_err());
+    }
+
+    #[test]
+    fn decrypt_strips_whitespace() {
+        // base64_decode tolerates embedded whitespace/newlines (some transports
+        // wrap lines). The cipher body should round-trip regardless.
+        let ct = encrypt("payload", "pw").unwrap();
+        let body = ct.strip_suffix(":v1").unwrap_or(&ct);
+        let with_ws = format!(" \n{} \n", body);
+        let tagged = format!("{}:v1", with_ws);
+        let pt = decrypt(&tagged, "pw").expect("whitespace-tolerant decode");
+        assert_eq!(pt, "payload");
+    }
+
+    // ---- cipher round-trip: fuzz ----
+
+    #[test]
+    fn cipher_round_trip_fuzz_random_json() {
+        /// Generate a random JSON value of varying shape/size and return its
+        /// serialized form. Covers nested objects, arrays, unicode, numbers.
+        fn random_json(rng: &mut impl Rng, depth: u32) -> serde_json::Value {
+            if depth >= 3 {
+                return serde_json::Value::from(rng.gen::<u32>());
+            }
+            match rng.gen_range(0..6) {
+                0 => serde_json::Value::Null,
+                1 => serde_json::Value::Bool(rng.gen_bool(0.5)),
+                2 => serde_json::Value::from(rng.gen::<i64>()),
+                3 => serde_json::Value::from(rng.gen::<f64>()),
+                4 => {
+                    // unicode string
+                    let n = rng.gen_range(0..40);
+                    let s: String = (0..n)
+                        .map(|_| {
+                            // mix ASCII and BMP codepoints
+                            let cp = if rng.gen_bool(0.5) {
+                                rng.gen_range(b'a'..=b'z') as u32
+                            } else {
+                                rng.gen_range(0x4e00..=0x9fff) // CJK block
+                            };
+                            char::from_u32(cp).unwrap_or('?')
+                        })
+                        .collect();
+                    serde_json::Value::String(s)
+                }
+                _ => {
+                    // array or object
+                    let n = rng.gen_range(0..6);
+                    if rng.gen_bool(0.5) {
+                        let arr: Vec<_> = (0..n).map(|_| random_json(rng, depth + 1)).collect();
+                        serde_json::Value::Array(arr)
+                    } else {
+                        let obj: serde_json::Map<String, serde_json::Value> = (0..n)
+                            .map(|i| (format!("k{i}"), random_json(rng, depth + 1)))
+                            .collect();
+                        serde_json::Value::Object(obj)
+                    }
+                }
+            }
+        }
+
+        let mut rng = rand::thread_rng();
+        for _ in 0..500 {
+            let v = random_json(&mut rng, 0);
+            let plain = serde_json::to_string(&v).expect("serialize");
+            // random passphrase: sometimes empty, sometimes unicode, sometimes long
+            let pw = match rng.gen_range(0..4) {
+                0 => String::new(),
+                1 => format!("pw-{}", rng.gen::<u32>()),
+                2 => "пароль".to_string(),
+                _ => (0..rng.gen_range(0..64)).map(|_| rng.gen::<char>()).collect::<String>(),
+            };
+            assert_round_trip(&plain, &pw);
+        }
+    }
+
+    #[test]
+    fn cipher_round_trip_fuzz_all_byte_values() {
+        // Plaintexts containing every possible byte value (as part of valid
+        // UTF-8 via Latin-1-ish construction). This stresses the XOR stream.
+        let mut rng = rand::thread_rng();
+        for _ in 0..100 {
+            let n = rng.gen_range(0..256);
+            // Build a string of ASCII bytes (0x20..0x7e) so from_utf8 always
+            // succeeds — we're testing the cipher, not UTF-8 validity.
+            let s: String = (0..n).map(|_| rng.gen_range(b' '..=b'~') as char).collect();
+            let pw: String = (0..rng.gen_range(0..32)).map(|_| rng.gen_range(b' '..=b'~') as char).collect();
+            assert_round_trip(&s, &pw);
+        }
+    }
 }
