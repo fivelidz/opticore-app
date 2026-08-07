@@ -52,6 +52,171 @@ fn is_safe_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Validate every row in the snapshot against the same field-level business
+/// rules enforced by the handler validations (commits 297c6ec, e586101,
+/// 1491ebe, 3620dee) and the DB CHECK constraints (migration 0015).
+///
+/// This runs BEFORE the bulk insert so that a snapshot containing bad rows is
+/// rejected up front with a clear, enumerated list of violations — rather than
+/// failing mid-import with an opaque "CHECK constraint failed" error that
+/// leaves the caller guessing about which row/table was at fault (and which
+/// would have already partially mutated the DB before the transaction rolled
+/// back).
+///
+/// Returns `Ok(())` if every row passes, or `Err(Vec<String>)` with one
+/// human-readable message per violation (capped at a reasonable number so a
+/// pathologically bad snapshot doesn't produce a megabyte-sized error body).
+///
+/// Rules checked (a row is only checked for a rule if the relevant column is
+/// present and non-null; absent columns fall back to the DB default, which the
+/// CHECK then guards on insert):
+///   appointments.duration_minutes      >= 1
+///   blocked_times                      start_at < end_at
+///   clinical_notes.note                non-empty after trim
+///   allergies.substance                non-empty after trim
+///   osdi_scores.total_score            >= 0
+///   ipl_treatments.session_number      >= 1
+///   booking_settings.reminder_hours_before >= 0
+///   booking_settings.booking_mode      IN ('automatic','approval')
+///   patients.first_name / last_name    non-empty after trim
+///   intake_submissions.first_name / last_name  non-empty after trim
+fn validate_snapshot(data: &serde_json::Map<String, serde_json::Value>) -> Result<(), Vec<String>> {
+    let mut errors: Vec<String> = Vec::new();
+
+    // Helper: fetch a field from a row object as a string (for text rules).
+    let get_str = |row: &serde_json::Map<String, serde_json::Value>, col: &str| -> Option<String> {
+        row.get(col).and_then(|v| v.as_str()).map(|s| s.to_string())
+    };
+    // Helper: fetch a field as a number (for numeric rules). JSON numbers may
+    // be integer or float; we normalize to f64 for comparison.
+    let get_num = |row: &serde_json::Map<String, serde_json::Value>, col: &str| -> Option<f64> {
+        row.get(col).and_then(|v| v.as_f64())
+    };
+
+    for (table, rows) in data {
+        let arr = match rows.as_array() {
+            Some(a) => a,
+            None => continue,
+        };
+        for (idx, row_v) in arr.iter().enumerate() {
+            let row = match row_v.as_object() {
+                Some(o) => o,
+                None => continue,
+            };
+            // Human-readable row locator for error messages.
+            let loc = format!("{}[{}]", table, idx);
+
+            match table.as_str() {
+                "appointments" => {
+                    if let Some(d) = get_num(row, "duration_minutes") {
+                        if d < 1.0 {
+                            errors.push(format!(
+                                "{loc}: duration_minutes must be >= 1 (got {d})"
+                            ));
+                        }
+                    }
+                }
+                "blocked_times" => {
+                    if let (Some(s), Some(e)) =
+                        (get_str(row, "start_at"), get_str(row, "end_at"))
+                    {
+                        // Lexicographic comparison is correct for the
+                        // ISO-8601 / RFC-3339 datetime strings this app stores
+                        // (and matches the DB-level CHECK, which compares the
+                        // stored TEXT values directly).
+                        if s >= e {
+                            errors.push(format!(
+                                "{loc}: start_at must be before end_at (got {s} >= {e})"
+                            ));
+                        }
+                    }
+                }
+                "clinical_notes" => {
+                    if let Some(n) = get_str(row, "note") {
+                        if n.trim().is_empty() {
+                            errors.push(format!("{loc}: note must not be empty"));
+                        }
+                    }
+                }
+                "allergies" => {
+                    if let Some(s) = get_str(row, "substance") {
+                        if s.trim().is_empty() {
+                            errors.push(format!("{loc}: substance must not be empty"));
+                        }
+                    }
+                }
+                "osdi_scores" => {
+                    if let Some(t) = get_num(row, "total_score") {
+                        if t < 0.0 {
+                            errors.push(format!(
+                                "{loc}: total_score must be >= 0 (got {t})"
+                            ));
+                        }
+                    }
+                }
+                "ipl_treatments" => {
+                    if let Some(n) = get_num(row, "session_number") {
+                        if n < 1.0 {
+                            errors.push(format!(
+                                "{loc}: session_number must be >= 1 (got {n})"
+                            ));
+                        }
+                    }
+                }
+                "booking_settings" => {
+                    if let Some(h) = get_num(row, "reminder_hours_before") {
+                        if h < 0.0 {
+                            errors.push(format!(
+                                "{loc}: reminder_hours_before must be >= 0 (got {h})"
+                            ));
+                        }
+                    }
+                    if let Some(m) = get_str(row, "booking_mode") {
+                        if m != "automatic" && m != "approval" {
+                            errors.push(format!(
+                                "{loc}: booking_mode must be 'automatic' or 'approval' (got {m:?})"
+                            ));
+                        }
+                    }
+                }
+                "patients" => {
+                    for col in ["first_name", "last_name"] {
+                        if let Some(v) = get_str(row, col) {
+                            if v.trim().is_empty() {
+                                errors.push(format!("{loc}: {col} must not be empty"));
+                            }
+                        }
+                    }
+                }
+                "intake_submissions" => {
+                    for col in ["first_name", "last_name"] {
+                        if let Some(v) = get_str(row, col) {
+                            if v.trim().is_empty() {
+                                errors.push(format!("{loc}: {col} must not be empty"));
+                            }
+                        }
+                    }
+                }
+                _ => {} // other tables: no field-level rules to check here
+            }
+
+            // Cap the error list so a pathologically bad snapshot doesn't
+            // produce a huge error body. The first 50 violations are enough
+            // for the caller to understand the scope of the problem.
+            if errors.len() >= 50 {
+                errors.push("... (too many violations, only the first 50 shown)".into());
+                return Err(errors);
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotMeta {
     pub snapshot_version: u32,
@@ -151,6 +316,22 @@ pub async fn import_data(
     }
 
     let data = snapshot.data.as_object().ok_or(ApiError::BadRequest("invalid snapshot data".into()))?;
+
+    // Validate every row against the field-level business rules BEFORE touching
+    // the DB. With the CHECK constraints (migration 0015) in place, a bad row
+    // would otherwise fail mid-insert with an opaque "CHECK constraint failed"
+    // error — leaving the caller to guess which row/table was at fault and
+    // having already opened (and set PRAGMA foreign_keys = OFF on) a pooled
+    // connection. Upfront validation gives a clear, enumerated 400 instead.
+    // See `validate_snapshot` for the full rule list.
+    if let Err(violations) = validate_snapshot(data) {
+        return Err(ApiError::BadRequest(format!(
+            "snapshot contains {} row(s) that violate field-level rules: {}",
+            violations.len(),
+            violations.join("; ")
+        )));
+    }
+
     let mut imported = 0;
 
     // Disable FK enforcement for the duration of the restore and wrap it in a

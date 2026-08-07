@@ -432,3 +432,308 @@ async fn blob_column_survives_export_import_round_trip() {
     let recovered: Vec<u8> = row.get::<Vec<u8>, _>("thumb_blob");
     assert_eq!(recovered, blob_bytes, "BLOB bytes must survive export→import round-trip");
 }
+
+// ---------- import: field-level validation (upfront snapshot scan) ----------
+//
+// With the CHECK constraints (migration 0015) in place, a snapshot containing
+// a row that violates a field-level rule would fail mid-insert with an opaque
+// "CHECK constraint failed" error. The import path now scans every row UP
+// FRONT and rejects the whole snapshot with a clear, enumerated 400 before
+// touching the DB. These tests characterize that upfront validation.
+
+/// Build a minimal valid snapshot skeleton with the given `data` object.
+fn make_snapshot(data: serde_json::Value) -> String {
+    let snap = serde_json::json!({
+        "meta": {
+            "snapshot_version": 1,
+            "app_version": "test",
+            "exported_at": "2026-01-01T00:00:00Z",
+            "table_count": data.as_object().map(|o| o.len()).unwrap_or(0),
+            "row_count": 0,
+            "encrypted": false,
+        },
+        "data": data,
+    });
+    snap.to_string()
+}
+
+/// Helper: import a snapshot and return the (status, body_json).
+async fn do_import(app: &TestApp, token: &str, snapshot: &str) -> (u16, serde_json::Value) {
+    let resp = app
+        .post("/api/data/import")
+        .auth(token)
+        .json(&serde_json::json!({ "snapshot": snapshot, "mode": "replace" }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, body_json(resp).await)
+}
+
+#[tokio::test]
+async fn import_rejects_appointment_with_zero_duration() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "appointments": [
+            { "id": 1, "patient_id": 1, "appointment_type": "x",
+              "appointment_date": "2099-01-01T09:00:00Z", "duration_minutes": 0 },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("duration_minutes") && body.contains(">= 1"),
+        "error should mention duration_minutes >= 1, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_rejects_negative_osdi_score() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "osdi_scores": [
+            { "id": 1, "patient_id": 1, "score_date": "2026-01-01", "total_score": -5.0 },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("total_score") && body.contains(">= 0"),
+        "error should mention total_score >= 0, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_rejects_empty_patient_name() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "patients": [
+            { "id": 1, "mrn": "X", "first_name": "", "last_name": "Doe",
+              "date_of_birth": "1990-01-01" },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("first_name") && body.contains("empty"),
+        "error should mention first_name empty, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_rejects_empty_clinical_note() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "clinical_notes": [
+            { "id": 1, "patient_id": 1, "note": "   " },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("note") && body.contains("empty"),
+        "error should mention note empty, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_rejects_ipl_session_zero() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "ipl_treatments": [
+            { "id": 1, "patient_id": 1, "treatment_date": "2026-01-01T10:00:00Z",
+              "session_number": 0 },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("session_number") && body.contains(">= 1"),
+        "error should mention session_number >= 1, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_rejects_blocked_time_start_ge_end() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "blocked_times": [
+            { "id": 1, "start_at": "2099-01-01T10:00:00Z", "end_at": "2099-01-01T10:00:00Z" },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("start_at") && body.contains("end_at"),
+        "error should mention start_at/end_at, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_rejects_bad_booking_mode() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "booking_settings": [
+            { "id": 1, "booking_mode": "bogus", "reminder_hours_before": 24 },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("booking_mode"),
+        "error should mention booking_mode, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_rejects_negative_reminder_hours() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "booking_settings": [
+            { "id": 1, "reminder_hours_before": -1 },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("reminder_hours_before"),
+        "error should mention reminder_hours_before, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_rejects_empty_allergy_substance() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "allergies": [
+            { "id": 1, "patient_id": 1, "substance": "" },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("substance") && body.contains("empty"),
+        "error should mention substance empty, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn import_rejects_empty_intake_name() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "intake_submissions": [
+            { "id": 1, "first_name": "Jane", "last_name": "" },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("last_name") && body.contains("empty"),
+        "error should mention last_name empty, got: {body}"
+    );
+}
+
+/// A snapshot with a MIX of good and bad rows is rejected in full — no partial
+/// import. This is the key correctness property: the caller never ends up with
+/// half the snapshot loaded.
+#[tokio::test]
+async fn import_rejects_mixed_good_and_bad_rows_no_partial_import() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+
+    // Count patients before (seed data).
+    let before = count_rows(&app, "patients").await;
+
+    let snap = make_snapshot(serde_json::json!({
+        "patients": [
+            // Good row.
+            { "id": 9991, "mrn": "IMP-GOOD", "first_name": "Good", "last_name": "Row",
+              "date_of_birth": "1990-01-01" },
+            // Bad row (empty first_name).
+            { "id": 9992, "mrn": "IMP-BAD", "first_name": "", "last_name": "Bad",
+              "date_of_birth": "1990-01-01" },
+        ]
+    }));
+    let (status, _v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400, "mixed snapshot must be rejected");
+
+    // The good row must NOT have been inserted (no partial import).
+    let after = count_rows(&app, "patients").await;
+    assert_eq!(
+        after, before,
+        "no rows should have been imported (partial-import guard): before={before}, after={after}"
+    );
+    // Specifically, the "good" row's id must not exist.
+    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM patients WHERE id = 9991")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(exists, 0, "the good row in a rejected snapshot must not be present");
+}
+
+/// A clean snapshot with all-valid rows imports successfully.
+#[tokio::test]
+async fn import_accepts_clean_snapshot() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+
+    let snap = make_snapshot(serde_json::json!({
+        "patients": [
+            { "id": 8881, "mrn": "IMP-CLEAN-1", "first_name": "Clean", "last_name": "One",
+              "date_of_birth": "1990-01-01" },
+            { "id": 8882, "mrn": "IMP-CLEAN-2", "first_name": "Clean", "last_name": "Two",
+              "date_of_birth": "1991-02-02" },
+        ],
+        "appointments": [
+            { "id": 7771, "patient_id": 8881, "appointment_type": "consultation",
+              "appointment_date": "2099-01-01T09:00:00Z", "duration_minutes": 30 },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 200, "clean snapshot should import; body: {v}");
+    assert!(v["imported"].as_i64().unwrap() >= 3, "all 3 rows imported");
+}
+
+/// A snapshot with multiple violations reports ALL of them (not just the first).
+#[tokio::test]
+async fn import_reports_all_violations_not_just_first() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+
+    let snap = make_snapshot(serde_json::json!({
+        "appointments": [
+            { "id": 1, "patient_id": 1, "appointment_type": "x",
+              "appointment_date": "2099-01-01T09:00:00Z", "duration_minutes": 0 },
+        ],
+        "osdi_scores": [
+            { "id": 1, "patient_id": 1, "score_date": "2026-01-01", "total_score": -1.0 },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400);
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("duration_minutes") && body.contains("total_score"),
+        "error should enumerate BOTH violations, got: {body}"
+    );
+}
