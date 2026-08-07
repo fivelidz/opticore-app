@@ -24,6 +24,14 @@ pub async fn list_notes(State(state): State<AppState>, Path(pid): Path<i64>) -> 
 }
 
 pub async fn add_note(State(state): State<AppState>, Json(b): Json<CreateNote>) -> ApiResult<axum::response::Response> {
+    // The `note` column is TEXT NOT NULL, but that still accepts the empty
+    // string. An empty (or whitespace-only) clinical note is meaningless, so
+    // reject it before insert.
+    if b.note.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "note must not be empty".into(),
+        ));
+    }
     let r = sqlx::query("INSERT INTO clinical_notes (patient_id, author, category, note) VALUES (?, ?, ?, ?)")
         .bind(b.patient_id).bind(&b.author).bind(&b.category).bind(&b.note)
         .execute(&state.db).await?;
@@ -53,6 +61,13 @@ pub async fn list_allergies(State(state): State<AppState>, Path(pid): Path<i64>)
 }
 
 pub async fn add_allergy(State(state): State<AppState>, Json(b): Json<CreateAllergy>) -> ApiResult<Json<Allergy>> {
+    // `substance` is VARCHAR(200) NOT NULL, but that accepts the empty string.
+    // An allergy with no substance is meaningless.
+    if b.substance.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "substance must not be empty".into(),
+        ));
+    }
     let r = sqlx::query("INSERT INTO allergies (patient_id, substance, severity) VALUES (?, ?, ?)")
         .bind(b.patient_id).bind(&b.substance).bind(&b.severity).execute(&state.db).await?;
     let id = r.last_insert_rowid();
@@ -82,6 +97,16 @@ pub async fn list_osdi(State(state): State<AppState>, Path(pid): Path<i64>) -> A
 }
 
 pub async fn add_osdi(State(state): State<AppState>, Json(b): Json<CreateOsdi>) -> ApiResult<Json<OsdiScore>> {
+    // OSDI total_score is a severity score in the range [0, 100]. Negative
+    // values are meaningless. (We do not upper-bound at 100 here because the
+    // raw-sum subscores can legitimately exceed 100 before normalization; the
+    // total itself is the practitioner's responsibility. The lower bound is
+    // unambiguous.)
+    if b.total_score < 0.0 || b.total_score.is_nan() {
+        return Err(ApiError::BadRequest(
+            "total_score must be a non-negative number".into(),
+        ));
+    }
     let r = sqlx::query("INSERT INTO osdi_scores (patient_id, score_date, total_score, ocular_symptoms, vision_function, environmental_triggers) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(b.patient_id).bind(&b.score_date).bind(b.total_score)
         .bind(b.ocular_symptoms).bind(b.vision_function).bind(b.environmental_triggers)
@@ -110,6 +135,12 @@ pub async fn list_ipl(State(state): State<AppState>, Path(pid): Path<i64>) -> Ap
 }
 
 pub async fn add_ipl(State(state): State<AppState>, Json(b): Json<CreateIpl>) -> ApiResult<Json<IplTreatment>> {
+    // Treatment sessions are 1-indexed; session_number < 1 is nonsensical.
+    if b.session_number < 1 {
+        return Err(ApiError::BadRequest(
+            "session_number must be >= 1".into(),
+        ));
+    }
     let dt = shared::normalize_dt(&b.treatment_date);
     let r = sqlx::query("INSERT INTO ipl_treatments (patient_id, treatment_date, session_number, fluence_j_cm2, number_of_pulses, operator_name, clinical_notes) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .bind(b.patient_id).bind(&dt).bind(b.session_number).bind(b.fluence_j_cm2)

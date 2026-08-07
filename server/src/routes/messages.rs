@@ -77,6 +77,19 @@ pub async fn link_patient(
     State(state): State<AppState>,
     Path((id, pid)): Path<(i64, i64)>,
 ) -> ApiResult<Json<shared::MessageResponse>> {
+    // The `messages` table has NO foreign-key constraint on
+    // `linked_patient_id` (it was added in 0005_messages.sql without one).
+    // Without this check, linking a message to a nonexistent patient would
+    // silently store a dangling reference. Verify the patient exists first.
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM patients WHERE id = ?)")
+        .bind(pid)
+        .fetch_one(&state.db)
+        .await?;
+    if !exists {
+        return Err(ApiError::BadRequest(
+            "referenced patient does not exist".into(),
+        ));
+    }
     sqlx::query("UPDATE messages SET linked_patient_id = ? WHERE id = ?")
         .bind(pid).bind(id).execute(&state.db).await?;
     Ok(Json(shared::MessageResponse { message: "Linked to patient".into() }))

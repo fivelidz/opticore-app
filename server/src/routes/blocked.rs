@@ -35,6 +35,11 @@ pub async fn create(
 ) -> ApiResult<axum::response::Response> {
     let start = shared::normalize_dt(&body.start_at);
     let end = shared::normalize_dt(&body.end_at);
+    // A blocked time must have a positive duration: end must be strictly after
+    // start. A zero/negative-duration block is nonsensical and breaks calendar
+    // rendering. We compare the parsed instants (not the raw strings) so that
+    // equivalent timestamps in different formats are still detected.
+    validate_blocked_range(&body.start_at, &body.end_at)?;
     let all_day = body.all_day.unwrap_or(false);
     let recurring = body.is_recurring.unwrap_or(false);
     let r = sqlx::query(
@@ -80,6 +85,8 @@ pub async fn update(
 ) -> ApiResult<axum::response::Response> {
     let start = shared::normalize_dt(&body.start_at);
     let end = shared::normalize_dt(&body.end_at);
+    // Same positive-duration rule as `create`.
+    validate_blocked_range(&body.start_at, &body.end_at)?;
     let all_day = body.all_day.unwrap_or(false);
     let recurring = body.is_recurring.unwrap_or(false);
     let r = sqlx::query(
@@ -92,4 +99,27 @@ pub async fn update(
     let rrow = sqlx::query("SELECT * FROM blocked_times WHERE id = ?").bind(id).fetch_one(&state.db).await?;
     use axum::response::IntoResponse;
     Ok((StatusCode::OK, Json(row(&rrow))).into_response())
+}
+
+/// Validate that a blocked-time range has a positive duration: `end_at` must
+/// parse as a datetime and be strictly after `start_at`. Rejects malformed
+/// dates, zero-duration blocks, and inverted ranges. Returns BadRequest on
+/// failure.
+fn validate_blocked_range(start_at: &str, end_at: &str) -> ApiResult<()> {
+    let start = shared::parse_dt(start_at).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "start_at '{start_at}' is not a valid datetime (expected RFC3339 or YYYY-MM-DD)"
+        ))
+    })?;
+    let end = shared::parse_dt(end_at).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "end_at '{end_at}' is not a valid datetime (expected RFC3339 or YYYY-MM-DD)"
+        ))
+    })?;
+    if end <= start {
+        return Err(ApiError::BadRequest(
+            "end_at must be strictly after start_at".into(),
+        ));
+    }
+    Ok(())
 }

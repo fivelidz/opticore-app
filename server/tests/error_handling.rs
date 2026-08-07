@@ -480,11 +480,15 @@ async fn blocked_create_returns_500_on_db_failure() {
     let app = TestApp::spawn().await;
     let t = token(&app).await;
     kill_db(&app).await;
+    // Use RFC3339 dates so the handler's range validation (added in session 10)
+    // passes and the request reaches the DB layer — which is what this test
+    // exercises. (A non-RFC3339 date would now be rejected with 400 before
+    // hitting the DB, defeating the test's purpose.)
     let resp = app
         .post("/api/blocked-times")
         .auth(&t)
         .json(&serde_json::json!({
-            "start_at": "2026-01-01 09:00", "end_at": "2026-01-01 17:00",
+            "start_at": "2099-01-01T09:00:00Z", "end_at": "2099-01-01T17:00:00Z",
             "reason": "lunch", "practitioner": null,
             "all_day": null, "is_recurring": null
         }))
