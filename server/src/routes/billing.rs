@@ -95,8 +95,35 @@ pub async fn create_invoice(State(state): State<AppState>, Json(b): Json<CreateI
     }).collect();
     let total_amount = subtotal + tax;
 
-    // generate invoice number
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM invoices").fetch_one(&state.db).await?;
+    // Generate the invoice number and insert the invoice inside a single
+    // `BEGIN IMMEDIATE` transaction.
+    //
+    // RACE FIX: previously the invoice number was derived from
+    // `SELECT COUNT(*) FROM invoices` executed *outside* any transaction.
+    // Two concurrent `create_invoice` calls could both read the same count,
+    // compute the same `INV-2026-{:04}` number, and the second INSERT then
+    // violated the `invoice_number UNIQUE` constraint — surfacing as an HTTP
+    // 409 to one caller even though both requests were legitimate.
+    //
+    // `BEGIN IMMEDIATE` acquires the SQLite write lock at transaction start
+    // (rather than deferring it to the first write). SQLite only allows a
+    // single writer at a time, so this serializes the count-then-insert
+    // sequence: each transaction sees a row count that reflects all
+    // previously-committed invoices. Concurrent writers simply block until
+    // the lock is released (subject to the pool's busy timeout), then
+    // proceed — they never see a stale count.
+    //
+    // (SQLite has no `SELECT ... FOR UPDATE`; `BEGIN IMMEDIATE` is the
+    // standard SQLite idiom for serializing writers.)
+    let mut conn = state.db.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    // Generate invoice number inside the transaction. We keep the historical
+    // `COUNT(*) + 7` offset so existing/seeded invoice numbers are unchanged;
+    // the correctness gain comes from the serializing transaction, not from
+    // the numbering scheme.
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM invoices")
+        .fetch_one(&mut *conn).await?;
     let invoice_number = format!("INV-2026-{:04}", count.0 + 7);
 
     let r = sqlx::query(
@@ -105,24 +132,33 @@ pub async fn create_invoice(State(state): State<AppState>, Json(b): Json<CreateI
         .bind(&invoice_number).bind(b.patient_id).bind(b.appointment_id)
         .bind(subtotal).bind(tax).bind(total_amount).bind(total_amount)
         .bind(&b.payment_method).bind(&b.notes)
-        .execute(&state.db).await?;
+        .execute(&mut *conn).await?;
     let inv_id = r.last_insert_rowid();
 
-    for (item_type, desc, qty, price, disc, tr, total) in computed {
+    for (item_type, desc, qty, price, disc, tr, total) in &computed {
         sqlx::query("INSERT INTO invoice_items (invoice_id, item_type, description, quantity, unit_price, discount_percent, tax_rate, total) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(inv_id).bind(&item_type).bind(&desc).bind(qty).bind(price).bind(disc).bind(tr).bind(total)
-            .execute(&state.db).await?;
+            .bind(inv_id).bind(item_type).bind(desc).bind(*qty).bind(*price).bind(*disc).bind(*tr).bind(*total)
+            .execute(&mut *conn).await?;
     }
 
-    // return full invoice
-    let row = sqlx::query("SELECT * FROM invoices WHERE id = ?").bind(inv_id).fetch_one(&state.db).await?;
+    // Read back the full invoice row + items within the same transaction so
+    // the returned object reflects the committed state.
+    let row = sqlx::query("SELECT * FROM invoices WHERE id = ?").bind(inv_id)
+        .fetch_one(&mut *conn).await?;
     let items = sqlx::query("SELECT * FROM invoice_items WHERE invoice_id = ?").bind(inv_id)
-        .fetch_all(&state.db).await?
+        .fetch_all(&mut *conn).await?
         .iter().map(|r| InvoiceItem {
             id: r.get("id"), invoice_id: r.get("invoice_id"), item_type: r.get("item_type"),
             description: r.get("description"), quantity: r.get("quantity"), unit_price: r.get("unit_price"),
             discount_percent: r.get("discount_percent"), tax_rate: r.get("tax_rate"), total: r.get("total"),
         }).collect();
+
+    // Commit the transaction. If any statement above returned an error, the
+    // `?` operator would propagate it and `conn` would be dropped — sqlx
+    // rolls back an un-committed transaction on drop, so partial writes are
+    // never persisted.
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
+
     Ok(Json(Invoice {
         id: inv_id, invoice_number: row.get("invoice_number"), patient_id: row.get("patient_id"),
         appointment_id: row.get("appointment_id"), invoice_date: row.get("invoice_date"),
