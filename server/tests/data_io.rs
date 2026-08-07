@@ -861,3 +861,83 @@ async fn merge_import_empty_users_preserves_rows() {
     let after = count_rows(&app, "users").await;
     assert_eq!(after, before, "merge mode must not delete users");
 }
+
+// ---------- import: type-coercion rejection ----------
+//
+// validate_snapshot uses .as_f64()/.as_str() which return None when the JSON
+// type doesn't match. So a snapshot where a numeric field is a STRING skips
+// validation entirely. SQLite's flexible typing then stores the string verbatim
+// in an INTEGER-affinity column (e.g. duration_minutes = "thirty" persists as
+// TEXT) — silent data corruption. The import must reject wrong-type fields.
+
+/// A snapshot row where a numeric field is a non-numeric string must be
+/// rejected, not silently stored as TEXT.
+#[tokio::test]
+async fn import_rejects_string_in_numeric_field() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    // duration_minutes is a string "thirty" instead of a number.
+    let snap = make_snapshot(serde_json::json!({
+        "appointments": [
+            { "id": 1, "patient_id": 1, "appointment_type": "x",
+              "appointment_date": "2099-01-01T09:00:00Z", "duration_minutes": "thirty" },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400, "string in a numeric field must be rejected; body: {v}");
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("duration_minutes"),
+        "error should mention duration_minutes type mismatch, got: {body}"
+    );
+}
+
+/// A snapshot row where a numeric field is a JSON object must be rejected.
+#[tokio::test]
+async fn import_rejects_object_in_numeric_field() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "appointments": [
+            { "id": 1, "patient_id": 1, "appointment_type": "x",
+              "appointment_date": "2099-01-01T09:00:00Z", "duration_minutes": {"oops": 1} },
+        ]
+    }));
+    let (status, _v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400, "object in a numeric field must be rejected");
+}
+
+/// A snapshot row where a numeric field is a JSON array must be rejected.
+#[tokio::test]
+async fn import_rejects_array_in_numeric_field() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "osdi_scores": [
+            { "id": 1, "patient_id": 1, "score_date": "2026-01-01", "total_score": [1, 2, 3] },
+        ]
+    }));
+    let (status, _v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400, "array in a numeric field must be rejected");
+}
+
+/// A snapshot row where a string field is a number must be rejected (e.g.
+/// first_name as a number). SQLite would coerce it, but it's still wrong type.
+#[tokio::test]
+async fn import_rejects_number_in_string_field() {
+    let app = TestApp::spawn().await;
+    let t = token(&app).await;
+    let snap = make_snapshot(serde_json::json!({
+        "patients": [
+            { "id": 1, "mrn": "X", "first_name": 123, "last_name": "Doe",
+              "date_of_birth": "1990-01-01" },
+        ]
+    }));
+    let (status, v) = do_import(&app, &t, &snap).await;
+    assert_eq!(status, 400, "number in a string field must be rejected; body: {v}");
+    let body = serde_json::to_string(&v).unwrap();
+    assert!(
+        body.contains("first_name"),
+        "error should mention first_name type mismatch, got: {body}"
+    );
+}

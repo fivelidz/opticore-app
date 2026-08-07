@@ -80,6 +80,48 @@ fn is_safe_identifier(s: &str) -> bool {
 ///   booking_settings.booking_mode      IN ('automatic','approval')
 ///   patients.first_name / last_name    non-empty after trim
 ///   intake_submissions.first_name / last_name  non-empty after trim
+///
+/// Type checking: for every field listed below, if the field is PRESENT in a
+/// row and non-null, its JSON type is validated (number vs string). SQLite has
+/// flexible typing — an INTEGER-affinity column will happily store a string
+/// like "thirty" as TEXT — so without this check, a wrong-type value bypasses
+/// the value rules (which use .as_f64()/.as_str() and return None on mismatch)
+/// and is silently stored as the wrong type. See `expected_field_types`.
+fn expected_field_types(table: &str) -> &'static [(&'static str, bool)] {
+    // (column_name, expect_number). true = must be a JSON number; false = must
+    // be a JSON string. Only the fields that carry semantic meaning and have a
+    // clear expected type are listed — this is not an exhaustive column list.
+    match table {
+        "appointments" => &[
+            ("duration_minutes", true),
+            ("patient_id", true),
+        ],
+        "blocked_times" => &[],
+        "clinical_notes" => &[("patient_id", true)],
+        "allergies" => &[("patient_id", true)],
+        "osdi_scores" => &[
+            ("patient_id", true),
+            ("total_score", true),
+        ],
+        "ipl_treatments" => &[
+            ("patient_id", true),
+            ("session_number", true),
+        ],
+        "booking_settings" => &[
+            ("reminder_hours_before", true),
+        ],
+        "patients" => &[
+            ("first_name", false),
+            ("last_name", false),
+        ],
+        "intake_submissions" => &[
+            ("first_name", false),
+            ("last_name", false),
+        ],
+        _ => &[],
+    }
+}
+
 fn validate_snapshot(data: &serde_json::Map<String, serde_json::Value>) -> Result<(), Vec<String>> {
     let mut errors: Vec<String> = Vec::new();
 
@@ -105,6 +147,44 @@ fn validate_snapshot(data: &serde_json::Map<String, serde_json::Value>) -> Resul
             };
             // Human-readable row locator for error messages.
             let loc = format!("{}[{}]", table, idx);
+
+            // ---- Type checking ----
+            //
+            // SQLite has flexible typing (INTEGER-affinity columns accept and
+            // store strings), so a snapshot with a wrong-type field would be
+            // silently stored as the wrong type — data corruption. The
+            // .as_f64()/.as_str() helpers above return None on type mismatch,
+            // which means the VALUE rules below are silently skipped for
+            // wrong-type values. This block catches the type mismatch itself
+            // and rejects it explicitly, BEFORE the value rules run.
+            //
+            // Only fields that have an expected type AND are present in the row
+            // are checked; absent fields fall back to DB defaults.
+            for (col, expect_num) in expected_field_types(table.as_str()) {
+                let col = *col;
+                if let Some(v) = row.get(col) {
+                    if v.is_null() {
+                        continue; // NULL is handled by the NOT NULL constraint
+                    }
+                    let actual_is_num = v.is_number();
+                    let actual_is_str = v.is_string();
+                    let type_ok = if *expect_num { actual_is_num } else { actual_is_str };
+                    if !type_ok {
+                        let want = if *expect_num { "number" } else { "string" };
+                        let got = match v {
+                            serde_json::Value::Null => "null",
+                            serde_json::Value::Bool(_) => "boolean",
+                            serde_json::Value::Number(_) => "number",
+                            serde_json::Value::String(_) => "string",
+                            serde_json::Value::Array(_) => "array",
+                            serde_json::Value::Object(_) => "object",
+                        };
+                        errors.push(format!(
+                            "{loc}: {col} must be a {want} (got {got})"
+                        ));
+                    }
+                }
+            }
 
             match table.as_str() {
                 "appointments" => {
