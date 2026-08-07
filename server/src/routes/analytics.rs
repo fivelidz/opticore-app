@@ -10,8 +10,29 @@ use shared::{
 };
 use sqlx::Row;
 
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::AppState;
+
+/// Validate and clamp a `:days` path parameter for the time-series endpoints.
+///
+/// The series endpoints interpolate `days` into a SQLite date modifier
+/// (`format!("-{days} days")`). A negative value produces a malformed modifier
+/// like `"--5 days"`: SQLite's `date('now', '--5 days')` returns NULL, so the
+/// `WHERE date >= NULL` predicate is never true and the endpoint silently
+/// returns an empty array instead of an error. Zero (`"-0 days"`) is
+/// semantically odd for a "series over the last N days" but not broken.
+///
+/// Reject `days < 1` as a 400 (bad input) and upper-bound at 3650 (10 years)
+/// to prevent surprising query plans on absurd ranges. This mirrors the
+/// `public_api::availability` `clamp(1, 30)` pattern.
+fn validate_days(days: i64) -> ApiResult<i64> {
+    if days < 1 {
+        return Err(ApiError::BadRequest(
+            "days must be >= 1".into(),
+        ));
+    }
+    Ok(days.min(3650))
+}
 
 pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<AnalyticsOverview>> {
     let p: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM patients").fetch_one(&state.db).await?;
@@ -37,6 +58,7 @@ pub async fn overview(State(state): State<AppState>) -> ApiResult<Json<Analytics
 
 /// Revenue per day for the last N days (default 30).
 pub async fn revenue_series(State(state): State<AppState>, Path(days): Path<i64>) -> ApiResult<Json<Vec<TimeSeriesPoint>>> {
+    let days = validate_days(days)?;
     let rows = sqlx::query(
         "SELECT DATE(invoice_date) AS d, CAST(COALESCE(SUM(amount_paid),0) AS REAL) AS v
          FROM invoices
@@ -52,6 +74,7 @@ pub async fn revenue_series(State(state): State<AppState>, Path(days): Path<i64>
 
 /// Appointments per day for the last N days.
 pub async fn appointment_series(State(state): State<AppState>, Path(days): Path<i64>) -> ApiResult<Json<Vec<TimeSeriesPoint>>> {
+    let days = validate_days(days)?;
     let rows = sqlx::query(
         "SELECT DATE(appointment_date) AS d, COUNT(*) AS v
          FROM appointments
@@ -67,6 +90,7 @@ pub async fn appointment_series(State(state): State<AppState>, Path(days): Path<
 
 /// Website traffic for the last N days.
 pub async fn traffic_series(State(state): State<AppState>, Path(days): Path<i64>) -> ApiResult<Json<Vec<WebsiteTrafficPoint>>> {
+    let days = validate_days(days)?;
     let rows = sqlx::query(
         "SELECT event_date, visitors, page_views, bookings, source
          FROM website_events
@@ -95,6 +119,7 @@ pub async fn traffic_by_source(State(state): State<AppState>) -> ApiResult<Json<
 
 /// New patients per week for the last N days (grouped by ISO week start).
 pub async fn patient_growth(State(state): State<AppState>, Path(days): Path<i64>) -> ApiResult<Json<Vec<TimeSeriesPoint>>> {
+    let days = validate_days(days)?;
     // SQLite: bucket each created_at into the Monday of its week via date(created_at,'weekday 0','-6 days').
     let rows = sqlx::query(
         "SELECT date(created_at, 'weekday 0', '-6 days') AS wk, COUNT(*) AS v
