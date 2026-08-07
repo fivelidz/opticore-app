@@ -1,6 +1,6 @@
 //! Referential-integrity audit: characterize the foreign-key enforcement
-//! state of the schema and prove (via direct DB writes) where orphans can
-//! and cannot be created.
+//! state of the schema and prove (via direct DB writes) that declared FKs
+//! are enforced — including the soft-link columns fixed in migration 0016.
 //!
 //! ## Background
 //!
@@ -11,20 +11,18 @@
 //! import path temporarily flips it OFF per-connection for ordered bulk
 //! restore and restores it ON afterwards (documented in `data_io.rs`).
 //!
-//! However, `PRAGMA foreign_keys = ON` only enforces FKs that are actually
-//! **declared** in the schema. Two soft-link columns were created without a
-//! FOREIGN KEY declaration and therefore can hold dangling references
-//! regardless of the pragma:
+//! `PRAGMA foreign_keys = ON` only enforces FKs that are actually **declared**
+//! in the schema. Two soft-link columns were originally created without a
+//! FOREIGN KEY declaration:
 //!
 //!   * `messages.linked_patient_id`          (migration 0005)
 //!   * `intake_submissions.matched_patient_id` (migration 0004)
 //!
-//! The handler routes that write these columns both have application-level
-//! guards (see `messages::link_patient`, `intake::import_*`), so under normal
-//! use no orphan is created. But the schema itself provides no defense-in-
-//! depth: a future code path, a bulk import, or a direct DB write can create
-//! a dangling row that the DB will not reject. This file proves that gap and
-//! documents the intentionally-unconstrained soft links.
+//! Migration `0016_fk_soft_links.sql` closed that gap by rebuilding both
+//! tables with `FOREIGN KEY ... REFERENCES patients(id) ON DELETE SET NULL`.
+//! The DB now rejects orphan inserts on these columns at the schema layer
+//! (defense-in-depth), and deleting a patient NULLs the dangling pointer
+//! instead of leaving it.
 //!
 //! ## What we characterize
 //!
@@ -34,16 +32,15 @@
 //!   2. **Declared FKs are enforced** — inserting a row that violates a
 //!      declared FK (e.g. appointment → nonexistent patient) is rejected by
 //!      the DB. This proves `PRAGMA foreign_keys = ON` is effective.
-//!   3. **Undeclared soft-links allow orphans (the gap)** — inserting a
-//!      message / intake_submission with a dangling patient reference
-//!      SUCCEEDS because no FK is declared. These tests assert the current
-//!      broken behaviour with a TODO comment, matching the project's
-//!      `*_documented_decision` convention. When a migration adds the FK,
-//!      these tests must be flipped to expect rejection.
-//!   4. **Intentionally-unconstrained soft-links** — `audit_log.user_id` and
+//!   3. **Soft-link FKs are enforced (post-0016)** — the formerly-unconstrained
+//!      `messages.linked_patient_id` and `intake_submissions.matched_patient_id`
+//!      now reject orphan inserts too.
+//!   4. **Delete semantics** — declared ON DELETE CASCADE removes dependent
+//!      rows; the soft-link ON DELETE SET NULL nulls the pointer.
+//!   5. **Intentionally-unconstrained soft-links** — `audit_log.user_id` and
 //!      `booking_notifications.{booking_id,intake_submission_id}` are
-//!      deliberately FK-free (documented in migration 0014). We characterize
-//!      that they accept dangling values by design.
+//!      deliberately FK-free (documented in migration 0014) and accept
+//!      dangling values by design.
 
 mod common;
 
@@ -122,21 +119,22 @@ async fn fk_declaration_audit() {
     // --- payments.invoice_id -> invoices(id) ON DELETE CASCADE ---
     assert!(has_fk(pool, "payments", "invoice_id", "invoices").await);
 
-    // --- The GAP: soft-link columns with NO FK declaration ---
+    // --- The GAP is now CLOSED (migration 0016) ---
     //
-    // These two columns point at patients(id) semantically but have no
-    // FOREIGN KEY clause, so the DB cannot reject dangling references.
-    // Documented here so the gap is visible in the test suite. See the
-    // orphan-creation tests below for the behavioural proof.
+    // These two columns previously pointed at patients(id) semantically but
+    // had no FOREIGN KEY clause, so the DB could not reject dangling
+    // references. Migration 0016_fk_soft_links.sql rebuilt both tables with
+    // `FOREIGN KEY ... REFERENCES patients(id) ON DELETE SET NULL`. The DB
+    // now enforces referential integrity on these columns too.
     assert!(
-        !has_fk(pool, "messages", "linked_patient_id", "patients").await,
-        "messages.linked_patient_id has NO FK declaration — orphans are silently possible \
-         (defense-in-depth gap; handler guards compensate but schema does not enforce)"
+        has_fk(pool, "messages", "linked_patient_id", "patients").await,
+        "messages.linked_patient_id must declare an FK to patients(id) \
+         (added in migration 0016_fk_soft_links.sql)"
     );
     assert!(
-        !has_fk(pool, "intake_submissions", "matched_patient_id", "patients").await,
-        "intake_submissions.matched_patient_id has NO FK declaration — orphans are silently possible \
-         (defense-in-depth gap; handler guards compensate but schema does not enforce)"
+        has_fk(pool, "intake_submissions", "matched_patient_id", "patients").await,
+        "intake_submissions.matched_patient_id must declare an FK to patients(id) \
+         (added in migration 0016_fk_soft_links.sql)"
     );
 
     // --- Intentionally-unconstrained soft-links (documented decision) ---
@@ -220,38 +218,28 @@ async fn declared_fk_blocks_orphan_invoice_item() {
 }
 
 // ===========================================================================
-// 3. The GAP: undeclared soft-links allow orphans (defense-in-depth hole)
+// 3. Soft-link FKs are now enforced (migration 0016 closed the gap)
 // ===========================================================================
 //
-// These two tests prove the orphan-creation bug exists TODAY: because
-// `messages.linked_patient_id` and `intake_submissions.matched_patient_id`
-// have no FOREIGN KEY declaration, a direct DB write (or a future code path
-// that bypasses the handler guard) can store a dangling reference. The DB
-// does not reject it.
-//
-// We assert the CURRENT broken behaviour (insert succeeds) with a TODO
-// comment, matching the project's `*_documented_decision` convention. When a
-// migration adds the FK declarations, flip these to expect rejection and
-// move them into section 2.
+// These two columns previously had no FOREIGN KEY declaration, so a direct DB
+// write could store a dangling `linked_patient_id` / `matched_patient_id`.
+// Migration 0016_fk_soft_links.sql rebuilt both tables with
+// `FOREIGN KEY ... REFERENCES patients(id) ON DELETE SET NULL`. The DB now
+// rejects orphan inserts at the schema layer — defense-in-depth is restored.
 
-/// PROOF OF GAP: a message can be linked to a nonexistent patient via a
-/// direct DB write, because `messages.linked_patient_id` has no FK.
+/// A message can NO LONGER be linked to a nonexistent patient via a direct DB
+/// write: `messages.linked_patient_id` now has a declared FOREIGN KEY
+/// (migration 0016), and `PRAGMA foreign_keys = ON` is set at pool init.
 ///
-/// The `messages::link_patient` handler guards against this with an EXISTS
-/// check, so the HTTP path is safe today. But the schema provides no
-/// defense-in-depth: any other writer (bulk import, a new route, a migration
-/// that forgets the guard) will silently create an orphan that the DB cannot
-/// catch.
-///
-/// TODO(fk-defense-in-depth): once a migration adds
-/// `FOREIGN KEY (linked_patient_id) REFERENCES patients(id) ON DELETE SET NULL`
-/// to `messages`, flip the assertion below to expect the INSERT to FAIL.
+/// Previously (pre-0016) this insert silently succeeded and stored a dangling
+/// reference — the `messages::link_patient` handler guarded the HTTP path,
+/// but the schema provided no defense-in-depth. The migration closes that
+/// hole: any writer (bulk import, a new route, direct DB) is now rejected.
 #[tokio::test]
-async fn orphan_message_linked_patient_id_is_currently_allowed_documented_gap() {
+async fn soft_link_fk_blocks_orphan_message_linked_patient_id() {
     let app = TestApp::spawn().await;
     let pool = &app.state.db;
 
-    // Insert a message with no patient link first (the normal seed path).
     let res = sqlx::query(
         "INSERT INTO messages (channel, from_name, body, status, linked_patient_id)
          VALUES ('website', 'Orphan Probe', 'test', 'unread', 999999)",
@@ -259,38 +247,24 @@ async fn orphan_message_linked_patient_id_is_currently_allowed_documented_gap() 
     .execute(pool)
     .await;
 
-    // CURRENT BEHAVIOUR (the bug): succeeds because no FK is declared.
     assert!(
-        res.is_ok(),
-        "DOCUMENTED GAP: messages.linked_patient_id has no FOREIGN KEY declaration, so a \
-         dangling insert silently succeeds. The handler guards the HTTP path, but the schema \
-         does not enforce referential integrity. TODO: add the FK via a new migration and \
-         flip this assertion to expect rejection."
+        res.is_err(),
+        "INSERT into messages with a nonexistent linked_patient_id must be rejected by the \
+         FOREIGN KEY declared in migration 0016 (defense-in-depth: the schema now enforces \
+         what the handler previously guarded alone)"
     );
-
-    // Confirm the orphan row is actually persisted with the dangling value.
-    let row = sqlx::query("SELECT linked_patient_id FROM messages WHERE linked_patient_id = 999999")
-        .fetch_one(pool)
-        .await
-        .expect("orphan message row should be readable");
-    let v: Option<i64> = row.get("linked_patient_id");
-    assert_eq!(v, Some(999999), "the dangling linked_patient_id was persisted");
+    let msg = format!("{}", res.unwrap_err());
+    assert!(
+        msg.to_lowercase().contains("foreign key"),
+        "expected a FOREIGN KEY constraint error, got: {msg}"
+    );
 }
 
-/// PROOF OF GAP: an intake submission can be matched to a nonexistent
-/// patient via a direct DB write, because
-/// `intake_submissions.matched_patient_id` has no FK.
-///
-/// The intake import/approve/merge handlers all set `matched_patient_id` to
-/// a patient they just created or verified, so the HTTP path is safe today.
-/// But the schema provides no defense-in-depth.
-///
-/// TODO(fk-defense-in-depth): once a migration adds
-/// `FOREIGN KEY (matched_patient_id) REFERENCES patients(id) ON DELETE SET NULL`
-/// to `intake_submissions`, flip the assertion below to expect the INSERT to
-/// FAIL.
+/// An intake submission can NO LONGER be matched to a nonexistent patient via
+/// a direct DB write: `intake_submissions.matched_patient_id` now has a
+/// declared FOREIGN KEY (migration 0016).
 #[tokio::test]
-async fn orphan_intake_matched_patient_id_is_currently_allowed_documented_gap() {
+async fn soft_link_fk_blocks_orphan_intake_matched_patient_id() {
     let app = TestApp::spawn().await;
     let pool = &app.state.db;
 
@@ -301,23 +275,16 @@ async fn orphan_intake_matched_patient_id_is_currently_allowed_documented_gap() 
     .execute(pool)
     .await;
 
-    // CURRENT BEHAVIOUR (the bug): succeeds because no FK is declared.
     assert!(
-        res.is_ok(),
-        "DOCUMENTED GAP: intake_submissions.matched_patient_id has no FOREIGN KEY declaration, \
-         so a dangling insert silently succeeds. The handler guards the HTTP path, but the \
-         schema does not enforce referential integrity. TODO: add the FK via a new migration \
-         and flip this assertion to expect rejection."
+        res.is_err(),
+        "INSERT into intake_submissions with a nonexistent matched_patient_id must be rejected \
+         by the FOREIGN KEY declared in migration 0016"
     );
-
-    let row = sqlx::query(
-        "SELECT matched_patient_id FROM intake_submissions WHERE matched_patient_id = 999999",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("orphan intake row should be readable");
-    let v: Option<i64> = row.get("matched_patient_id");
-    assert_eq!(v, Some(999999), "the dangling matched_patient_id was persisted");
+    let msg = format!("{}", res.unwrap_err());
+    assert!(
+        msg.to_lowercase().contains("foreign key"),
+        "expected a FOREIGN KEY constraint error, got: {msg}"
+    );
 }
 
 // ===========================================================================
@@ -374,10 +341,11 @@ async fn deleting_patient_cascades_to_declared_dependents() {
 }
 
 /// When a patient is deleted, a `messages.linked_patient_id` pointing at it
-/// becomes a dangling reference (NOT nulled, NOT cascaded) because there is
-/// no FK declaration. This is the delete-side face of the gap.
+/// is NULLed (ON DELETE SET NULL) by the FOREIGN KEY declared in migration
+/// 0016. Previously (pre-0016) the reference dangled because there was no FK
+/// declaration; now the DB clears the pointer automatically.
 #[tokio::test]
-async fn deleting_patient_dangles_messages_linked_patient_id_documented_gap() {
+async fn deleting_patient_nulls_messages_linked_patient_id() {
     let app = TestApp::spawn().await;
     let pool = &app.state.db;
 
@@ -391,7 +359,7 @@ async fn deleting_patient_dangles_messages_linked_patient_id_documented_gap() {
     .unwrap();
     let pid: i64 = row.get("id");
 
-    // Link a message to it (direct DB write; no FK to enforce).
+    // Link a message to it.
     sqlx::query(
         "INSERT INTO messages (channel, from_name, body, status, linked_patient_id)
          VALUES ('website', 'Dangle Probe', 'test', 'unread', ?)",
@@ -408,18 +376,15 @@ async fn deleting_patient_dangles_messages_linked_patient_id_documented_gap() {
         .await
         .unwrap();
 
-    // The message row survives with a DANGLING linked_patient_id.
-    let row = sqlx::query("SELECT linked_patient_id FROM messages WHERE linked_patient_id = ?")
-        .bind(pid)
+    // The message row survives with linked_patient_id NULLed (SET NULL).
+    let row = sqlx::query("SELECT linked_patient_id FROM messages WHERE body = 'test'")
         .fetch_one(pool)
         .await
-        .expect("message row should still exist (no CASCADE/SET NULL declared)");
+        .expect("message row should still exist (ON DELETE SET NULL, not CASCADE)");
     let v: Option<i64> = row.get("linked_patient_id");
     assert_eq!(
-        v,
-        Some(pid),
-        "DOCUMENTED GAP: messages.linked_patient_id is now a dangling reference — the patient \
-         was deleted but the message still points at its id. No FK declaration means no \
-         ON DELETE SET NULL / CASCADE. TODO: add the FK and this becomes NULL (SET NULL)."
+        v, None,
+        "linked_patient_id must be NULL after the patient was deleted \
+         (ON DELETE SET NULL, declared in migration 0016)"
     );
 }
