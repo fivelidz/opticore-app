@@ -392,9 +392,12 @@ async fn appointment_rejects_malformed_date() {
 }
 
 #[tokio::test]
-async fn appointment_update_rejects_past_date() {
-    // Moving an existing appointment into the past via UPDATE should also
-    // be rejected.
+async fn appointment_update_allows_past_date() {
+    // Updating an existing appointment must ACCEPT a past appointment_date.
+    // The UI re-sends the original (past) date when marking a completed/cancelled
+    // appointment or editing its notes, so rejecting past dates on UPDATE would
+    // break the most common historical-appointment workflows. (Past-date
+    // rejection remains in force on CREATE.)
     let app = TestApp::spawn().await;
     let t = token(&app).await;
     let pid = create_patient(&app, &t, "PastUpd").await;
@@ -409,14 +412,17 @@ async fn appointment_update_rejects_past_date() {
     let r = app.post("/api/appointments").auth(&t).json(&body).send().await.unwrap();
     let appt_id = body_json(r).await["id"].as_i64().unwrap();
 
-    // Now try to move it into the past.
+    // Move it into the past AND change status — this is exactly what the
+    // "Mark completed" / "Cancel" buttons do for a historical appointment.
     let body = serde_json::json!({
         "appointment_type": "Consultation",
         "appointment_date": "2000-01-01T09:00:00Z",
         "duration_minutes": 30,
         "practitioner": "Dr. Test",
-        "status": "scheduled",
+        "status": "completed",
     });
     let resp = app.put(&format!("/api/appointments/{}", appt_id)).auth(&t).json(&body).send().await.unwrap();
-    assert_eq!(resp.status(), 400, "updating to a past appointment date must be 400");
+    assert_eq!(resp.status(), 200, "updating an appointment to a past date (e.g. marking it completed) must be accepted");
+    let j = body_json(resp).await;
+    assert_eq!(j["status"], "completed", "status change on a past-dated appointment must persist");
 }

@@ -180,18 +180,18 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(body): Json<UpdateAppointment>,
 ) -> ApiResult<Json<Appointment>> {
-    // Same date validation as `create`: reject malformed and past dates.
+    // Date validation on UPDATE: reject malformed dates, but DO NOT reject past
+    // dates. Updates are how the UI marks a past appointment "completed" /
+    // "cancelled" and edits its notes — those re-send the original (past)
+    // appointment_date, which must be allowed. (Past-date rejection remains in
+    // `create` — you can't book a new appointment in the past.)
     let parsed = shared::parse_dt(&body.appointment_date).ok_or_else(|| {
         ApiError::BadRequest(format!(
             "appointment_date '{}' is not a valid date (expected RFC3339 or YYYY-MM-DD)",
             body.appointment_date
         ))
     })?;
-    if parsed < chrono::Utc::now() {
-        return Err(ApiError::BadRequest(
-            "appointment_date cannot be in the past".into(),
-        ));
-    }
+    let _ = parsed; // (parsed only to validate shape; normalize_dt re-parses below)
     // Same duration rule as `create`.
     if body.duration_minutes < 1 {
         return Err(ApiError::BadRequest(

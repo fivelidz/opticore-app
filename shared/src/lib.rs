@@ -237,6 +237,15 @@ pub fn parse_dt(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         return Some(chrono::Utc.from_utc_datetime(&d.and_hms_opt(0, 0, 0)?));
     }
+    // The DB stores datetimes as "YYYY-MM-DD HH:MM:SS" (SQLite default), and the
+    // frontend round-trips that exact string on updates (e.g. marking a past
+    // appointment completed). Accept it so validation doesn't reject the
+    // storage format. Also accept the seconds-omitted "YYYY-MM-DD HH:MM" form.
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"] {
+        if let Ok(nd) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(chrono::Utc.from_utc_datetime(&nd));
+        }
+    }
     None
 }
 

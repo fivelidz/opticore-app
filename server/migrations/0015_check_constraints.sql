@@ -176,7 +176,20 @@ ALTER TABLE appointments_new RENAME TO appointments;
 -- children (depend on patients only).
 -- =====================================================================
 
--- ---- invoices (rebuilt IDENTICALLY to 0014 — retarget FK only) ----
+-- ---- invoices (rebuilt with the appointment_id FK) ----
+--
+-- CASCADE-SAFE REORDERING: invoice_items and payments both reference invoices
+-- with ON DELETE CASCADE. With foreign_keys=ON, a naive `DROP TABLE invoices`
+-- would cascade-delete EVERY invoice_items and payments row (silent mass data
+-- loss on upgrade — verified). To avoid that we stash the children into
+-- FK-free hold tables, drop them (so nothing references invoices), rebuild
+-- invoices safely, then recreate the children from the stashes with their FKs
+-- aimed at the new invoices table. Every row is preserved.
+CREATE TABLE invoice_items_hold AS SELECT * FROM invoice_items;
+CREATE TABLE payments_hold AS SELECT * FROM payments;
+DROP TABLE invoice_items;
+DROP TABLE payments;
+
 CREATE TABLE invoices_new (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     invoice_number VARCHAR(30) UNIQUE NOT NULL,
@@ -210,7 +223,8 @@ FROM invoices;
 DROP TABLE invoices;
 ALTER TABLE invoices_new RENAME TO invoices;
 
--- ---- patient_photos (rebuilt IDENTICALLY to 0014 — retarget FK only) ----
+-- ---- patient_photos (rebuilt with the appointment_id FK) ----
+-- patient_photos has no CASCADE children, so the naive rebuild is safe here.
 CREATE TABLE patient_photos_new (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     patient_id INTEGER NOT NULL,
@@ -237,8 +251,8 @@ FROM patient_photos;
 DROP TABLE patient_photos;
 ALTER TABLE patient_photos_new RENAME TO patient_photos;
 
--- ---- invoice_items (rebuilt IDENTICALLY — retarget FK to new invoices) ----
-CREATE TABLE invoice_items_new (
+-- ---- invoice_items (rebuilt from hold stash; FK aims at new invoices) ----
+CREATE TABLE invoice_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     invoice_id INTEGER NOT NULL,
     item_type VARCHAR(30) NOT NULL,
@@ -250,19 +264,18 @@ CREATE TABLE invoice_items_new (
     total REAL NOT NULL DEFAULT 0,
     FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
 );
-INSERT INTO invoice_items_new (
+INSERT INTO invoice_items (
     id, invoice_id, item_type, description, quantity, unit_price,
     discount_percent, tax_rate, total
 )
 SELECT
     id, invoice_id, item_type, description, quantity, unit_price,
     discount_percent, tax_rate, total
-FROM invoice_items;
-DROP TABLE invoice_items;
-ALTER TABLE invoice_items_new RENAME TO invoice_items;
+FROM invoice_items_hold;
+DROP TABLE invoice_items_hold;
 
--- ---- payments (rebuilt IDENTICALLY — retarget FK to new invoices) ----
-CREATE TABLE payments_new (
+-- ---- payments (rebuilt from hold stash; FK aims at new invoices) ----
+CREATE TABLE payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     invoice_id INTEGER NOT NULL,
     payment_date DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -273,16 +286,15 @@ CREATE TABLE payments_new (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
 );
-INSERT INTO payments_new (
+INSERT INTO payments (
     id, invoice_id, payment_date, amount, payment_method, reference_number,
     notes, created_at
 )
 SELECT
     id, invoice_id, payment_date, amount, payment_method, reference_number,
     notes, created_at
-FROM payments;
-DROP TABLE payments;
-ALTER TABLE payments_new RENAME TO payments;
+FROM payments_hold;
+DROP TABLE payments_hold;
 
 -- ---- clinical_notes (NEW: note non-empty CHECK) ----
 -- original: 0003_clinical_billing.sql
