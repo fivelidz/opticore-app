@@ -78,12 +78,28 @@ pub async fn info(State(state): State<AppState>) -> ApiResult<Json<DatabaseInfo>
 #[derive(Debug, Deserialize)]
 pub struct PathBody {
     pub path: String,
+    /// The SQLCipher password for this database. Optional for backwards
+    /// compatibility with unencrypted databases. When linking an encrypted DB
+    /// the password MUST be correct (we verify by opening it). When creating a
+    /// new DB the password becomes its encryption key.
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RestartResponse {
     pub ok: bool,
     pub restart_required: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DuplicateBody {
+    pub source_path: String,
+    pub dest_path: String,
+    /// The password of the SOURCE database (to verify the caller can read it).
+    /// The copy inherits the same password.
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 /// Validate that `path` names a file we can use as the clinic database.
@@ -132,9 +148,15 @@ fn validate_target(path: &Path, must_be_sqlite_if_exists: bool) -> Result<(), Ap
     Ok(())
 }
 
-/// Cheap header sniff: a valid SQLite database file begins with the 16-byte
-/// magic string "SQLite format 3\0". An empty (zero-byte) file is also accepted
-/// because SQLite will initialise it on first open.
+/// Cheap header sniff. A PLAIN SQLite database begins with the 16-byte magic
+/// "SQLite format 3\0". An ENCRYPTED (SQLCipher) database has random bytes
+/// there. An empty (zero-byte) file is also accepted because SQLite/SQLCipher
+/// will initialise it on first open.
+///
+/// We accept: empty files, plain SQLite files, and files that don't look like
+/// plain text (heuristic: the header contains a NUL byte or non-ASCII bytes,
+/// consistent with an encrypted or binary file). We reject obvious text files
+/// (e.g. someone accidentally points at a .txt or .csv).
 fn looks_like_sqlite(path: &Path) -> bool {
     use std::io::Read;
     const MAGIC: &[u8; 16] = b"SQLite format 3\0";
@@ -148,24 +170,95 @@ fn looks_like_sqlite(path: &Path) -> bool {
     }
     let mut header = [0u8; 16];
     match f.read_exact(&mut header) {
-        Ok(_) => &header == MAGIC,
+        Ok(_) => {
+            if &header == MAGIC {
+                return true; // plain SQLite
+            }
+            // Encrypted/binary heuristic: a NUL byte or any byte > 0x7F in the
+            // first 16 bytes means it's not plain ASCII text, so it's plausibly
+            // an encrypted SQLCipher DB. A real text file (.txt/.csv/.json) is
+            // almost entirely printable ASCII in its header.
+            header.iter().any(|&b| b == 0 || b > 0x7F)
+        }
         Err(_) => false,
     }
 }
 
+/// Try to open a database file with an optional SQLCipher key and run a trivial
+/// query. Returns Ok(()) if the DB is readable (correct key or unencrypted),
+/// Err with a clear message otherwise. Used by `link` to verify the password
+/// BEFORE committing it to the config.
+///
+/// This creates a temporary one-connection pool and does NOT touch the running
+/// server's pool.
+async fn verify_opens(path: &Path, password: Option<&str>) -> Result<(), String> {
+    let url = format!(
+        "sqlite://{}?mode=rw",
+        config::to_forward_slashes(path)
+    );
+    let mut opts: sqlx::sqlite::SqliteConnectOptions = url
+        .parse()
+        .map_err(|e: sqlx::Error| format!("Invalid path: {e}"))?;
+    opts = opts
+        .foreign_keys(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .busy_timeout(std::time::Duration::from_secs(5));
+    if let Some(pw) = password {
+        let quoted = format!("'{}'", pw.replace('\'', "''"));
+        opts = opts.pragma("key", quoted);
+    }
+    // mode=rw (NOT rwc) so we don't create a file that doesn't exist here.
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("file is not a database") || msg.contains("file is encrypted") {
+                "Wrong password (or the database is encrypted and no password was given).".into()
+            } else {
+                format!("Could not open the database: {msg}")
+            }
+        })?;
+    // Run a trivial read to force SQLCipher to actually decrypt a page — a wrong
+    // key passes the connect step but fails on first read.
+    sqlx::query("SELECT COUNT(*) FROM sqlite_schema")
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("file is not a database") || msg.contains("file is encrypted") {
+                "Wrong password (or the database is encrypted and no password was given).".into()
+            } else {
+                format!("Database opened but could not read it: {msg}")
+            }
+        })?;
+    pool.close().await;
+    Ok(())
+}
+
 /// POST /api/database/link — point OptiCore at an EXISTING database file.
 ///
-/// Validates the path (parent must exist; if the file exists it must be a
-/// SQLite file), writes it to the config, and asks the app to restart. Does
-/// NOT switch the running server.
+/// Validates the path, verifies the password (if any) actually opens the DB,
+/// writes path + password to the config, and asks the app to restart.
 pub async fn link(
     State(_state): State<AppState>,
     Json(body): Json<PathBody>,
 ) -> ApiResult<Json<RestartResponse>> {
     let path = PathBuf::from(body.path.trim());
+    let password = body.password.as_deref().map(str::trim).filter(|s| !s.is_empty());
     validate_target(&path, true)?;
 
-    config::write_db_path(&path)
+    // If the file exists, verify we can actually open it with the given
+    // password (catches "wrong password" before we commit it).
+    if path.exists() && !path.is_dir() {
+        if let Err(msg) = verify_opens(&path, password).await {
+            return Err(ApiError::BadRequest(msg));
+        }
+    }
+
+    config::write_db_path_and_password(&path, password)
         .map_err(|e| ApiError::Internal(format!("Could not save config: {e}")))?;
 
     Ok(Json(RestartResponse {
@@ -176,21 +269,26 @@ pub async fn link(
 
 /// POST /api/database/new — start a BRAND-NEW empty database at `path`.
 ///
-/// Creates the parent directories, writes the config, and asks for a restart.
-/// The file itself is created by SQLite on the next boot (mode=rwc) and
-/// migrations run on it; no demo data is seeded (the demo-seed migrations guard
-/// on an existing demo patient, which a fresh DB has none of).
+/// Creates the parent directories, writes path + password to the config, and
+/// asks for a restart. The file itself is created by SQLCipher on the next boot
+/// (mode=rwc) and migrations run on it; no demo data is seeded.
 pub async fn new_database(
     State(_state): State<AppState>,
     Json(body): Json<PathBody>,
 ) -> ApiResult<Json<RestartResponse>> {
     let path = PathBuf::from(body.path.trim());
+    let password = body.password.as_deref().map(str::trim).filter(|s| !s.is_empty());
     if path.as_os_str().is_empty() {
         return Err(ApiError::BadRequest("Path must not be empty".into()));
     }
     if path.is_dir() {
         return Err(ApiError::BadRequest(
             "That path is a folder, not a database file".into(),
+        ));
+    }
+    if password.is_none() {
+        return Err(ApiError::BadRequest(
+            "A password is required to protect the new database.".into(),
         ));
     }
 
@@ -201,20 +299,58 @@ pub async fn new_database(
     }
 
     // If a file already exists at this path, refuse rather than risk pointing a
-    // "new empty database" at real data (we never overwrite it — refuse and let
-    // the user pick "Link" instead).
+    // "new empty database" at real data.
     if path.exists() {
         return Err(ApiError::Conflict(
             "A file already exists there. Use \"Link to an existing database\" to open it, or choose a different name.".into(),
         ));
     }
 
-    config::write_db_path(&path)
+    config::write_db_path_and_password(&path, password)
         .map_err(|e| ApiError::Internal(format!("Could not save config: {e}")))?;
 
     Ok(Json(RestartResponse {
         ok: true,
         restart_required: true,
+    }))
+}
+
+/// POST /api/database/duplicate — copy an existing database to a new location.
+/// The copy inherits the same password. Used for backups / moving data.
+pub async fn duplicate(
+    State(_state): State<AppState>,
+    Json(body): Json<DuplicateBody>,
+) -> ApiResult<Json<RestartResponse>> {
+    let src = PathBuf::from(body.source_path.trim());
+    let dst = PathBuf::from(body.dest_path.trim());
+    let password = body.password.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    if !src.exists() {
+        return Err(ApiError::BadRequest("The source database does not exist".into()));
+    }
+    if dst.as_os_str().is_empty() {
+        return Err(ApiError::BadRequest("Destination path must not be empty".into()));
+    }
+    if dst.exists() {
+        return Err(ApiError::Conflict(
+            "A file already exists at the destination. Choose a different name.".into(),
+        ));
+    }
+    // Verify the caller can actually read the source (right password).
+    if let Err(msg) = verify_opens(&src, password).await {
+        return Err(ApiError::BadRequest(msg));
+    }
+    // Also copy the WAL/SHM sidecars if present so the copy is consistent.
+    if let Some(parent) = dst.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ApiError::BadRequest(format!("Could not create destination folder: {e}")))?;
+    }
+    std::fs::copy(&src, &dst)
+        .map_err(|e| ApiError::Internal(format!("Could not copy the file: {e}")))?;
+
+    Ok(Json(RestartResponse {
+        ok: true,
+        restart_required: false, // duplicate doesn't switch the active DB
     }))
 }
 

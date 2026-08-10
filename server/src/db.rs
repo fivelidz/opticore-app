@@ -8,6 +8,19 @@ use sqlx::{
 use tracing::{info, warn};
 
 pub async fn init_pool(url: &str) -> Result<SqlitePool> {
+    init_pool_with_key(url, None).await
+}
+
+/// Open the SQLite pool, optionally encrypting it with SQLCipher.
+///
+/// `db_key` is the raw password (NOT SQL-quoted). When set, we add a `key`
+/// pragma that SQLCipher honours — the file is AES-256 encrypted on disk and
+/// unreadable without the key. sqlx-sqlite special-cases the `key` pragma to
+/// run before anything else, which is a SQLCipher requirement.
+///
+/// When `db_key` is None the database is plain SQLite (backwards compatible
+/// with existing unencrypted databases created before this feature).
+pub async fn init_pool_with_key(url: &str, db_key: Option<&str>) -> Result<SqlitePool> {
     // sqlx expects "sqlite://" for in-file; ensure mode=rwc so it's created.
     let url = if url.contains('?') {
         url.to_string()
@@ -33,21 +46,7 @@ pub async fn init_pool(url: &str) -> Result<SqlitePool> {
     // because it runs on the connection after this default is applied.)
     //
     // `journal_mode = WAL` + `synchronous = NORMAL` + `busy_timeout = 5s`
-    // are essential for multi-device / multi-client concurrent access:
-    //
-    //   - WAL (Write-Ahead Logging) allows readers and a writer to coexist
-    //     without blocking each other. Under the default rollback-journal
-    //     mode, a write locks the entire database and concurrent reads (from
-    //     another device's request) fail with "database is locked". WAL lets
-    //     multiple LAN clients read while one writes — the common case for a
-    //     small clinic with several tablets/desktops hitting the same server.
-    //   - `synchronous = NORMAL` is the recommended companion to WAL: it's
-    //     nearly as safe as FULL (the WAL file is still fsync'd on checkpoint)
-    //     but dramatically faster, especially under concurrent write pressure.
-    //   - `busy_timeout = 5s` makes a connection that hits a lock WAIT up to
-    //     5 seconds before returning SQLITE_BUSY, instead of failing
-    //     instantly. This absorbs the brief contention windows that occur
-    //     when two requests try to write at the same instant.
+    // are essential for multi-device / multi-client concurrent access.
     //
     // The URL carries `?mode=rwc` which already sets `create_if_missing`, so
     // we don't set it again here.
@@ -57,6 +56,18 @@ pub async fn init_pool(url: &str) -> Result<SqlitePool> {
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .busy_timeout(std::time::Duration::from_secs(5));
+
+    // SQLCipher: if a key is provided, set the `key` pragma. sqlx-sqlite
+    // reserves the `key` pragma and runs it FIRST (before other pragmas and
+    // before any query), which is a SQLCipher requirement. The key must be
+    // SQL-string-quoted (single quotes) and any embedded single quotes are
+    // doubled to keep it a valid SQL string literal.
+    let connect_opts = if let Some(key) = db_key {
+        let quoted = format!("'{}'", key.replace('\'', "''"));
+        connect_opts.pragma("key", quoted)
+    } else {
+        connect_opts
+    };
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)

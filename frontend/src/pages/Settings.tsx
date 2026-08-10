@@ -87,9 +87,18 @@ function DatabaseCard() {
     if (!isTauri()) { setErr("File picking is only available in the desktop app."); return; }
     const path = await pickExistingDb();
     if (!path) return;
+    // Prompt for the database password. For an unencrypted DB the user can
+    // leave this blank, but encrypted DBs require the correct password.
+    const password = prompt(
+      "Enter the password for this database.\n\n" +
+      "• If this is an encrypted OptiCore database, enter its password.\n" +
+      "• If it has no password, leave this blank and click OK.\n\n" +
+      "(OptiCore will remember the password so you only enter it once.)"
+    );
+    if (password === null) return; // user clicked Cancel
     setBusy(true);
     try {
-      await database.link(path);
+      await database.link(path, password || undefined);
       await afterConfigured();
     } catch (e: any) {
       setErr(e?.response?.data?.error || "Could not link to that database.");
@@ -102,12 +111,55 @@ function DatabaseCard() {
     if (!isTauri()) { setErr("File picking is only available in the desktop app."); return; }
     const path = await pickNewDb();
     if (!path) return;
+    const password = prompt(
+      "Create a password for this new database.\n\n" +
+      "⚠️  IMPORTANT: This password protects the database file. If you\n" +
+      "    forget it, the data CANNOT be recovered — there is no reset.\n" +
+      "    Write it down somewhere safe.\n\n" +
+      "    The database file on its own (e.g. emailed or copied) cannot be\n" +
+      "    opened without this password."
+    );
+    if (password === null) return;
+    if (password.length < 4) {
+      setErr("Password must be at least 4 characters.");
+      return;
+    }
+    const confirm = prompt("Re-enter the password to confirm it is correct.");
+    if (confirm === null) return;
+    if (password !== confirm) {
+      setErr("The passwords did not match. Please try again.");
+      return;
+    }
     setBusy(true);
     try {
-      await database.create(path);
+      await database.create(path, password);
       await afterConfigured();
     } catch (e: any) {
       setErr(e?.response?.data?.error || "Could not create a new database.");
+      setBusy(false);
+    }
+  };
+
+  const onDuplicate = async () => {
+    setErr(""); setMsg("");
+    if (!isTauri() || !info) { setErr("Only available in the desktop app."); return; }
+    const dest = await pickNewDb();
+    if (!dest) return;
+    const password = prompt(
+      "Enter the password for the current database to make a copy.\n" +
+      "(The copy will have the same password.)"
+    );
+    if (password === null) return;
+    setBusy(true);
+    try {
+      const r = await database.duplicate(info.current_path, dest, password || undefined);
+      setMsg(r.data.restart_required
+        ? "Copied — restarting OptiCore…"
+        : `Copied to ${dest}. The original is unchanged.`);
+      if (r.data.restart_required) await afterConfigured();
+      else setBusy(false);
+    } catch (e: any) {
+      setErr(e?.response?.data?.error || "Could not duplicate the database.");
       setBusy(false);
     }
   };
@@ -144,9 +196,11 @@ function DatabaseCard() {
           </div>
 
           <div style={{ marginTop: 16, padding: "10px 12px", background: "var(--bg-soft, rgba(0,0,0,0.03))", borderRadius: 8, fontSize: 12.5, color: "var(--text-dim)", lineHeight: 1.5 }}>
-            Changing the database restarts OptiCore. Your current data is not
-            deleted — it stays in its file. To go back to it, link to it again.
-            Tip: back up your clinic by copying the file above.
+            Each database is <strong>password-protected</strong> and stored as a
+            separate file — so it survives uninstalling and reinstalling OptiCore,
+            and a copied/emailed file can't be opened without its password.
+            Changing the database restarts OptiCore. Your current data is never
+            deleted — to go back to it, link to it again.
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 18 }}>
@@ -155,6 +209,9 @@ function DatabaseCard() {
             </button>
             <button className="btn-ghost" onClick={onNew} disabled={busy} style={btn}>
               Start a new empty database…
+            </button>
+            <button className="btn-ghost" onClick={onDuplicate} disabled={busy || !info.file_exists} style={btn}>
+              Duplicate this database (backup / copy)…
             </button>
             <button
               className="btn-ghost"

@@ -117,6 +117,7 @@ fn admin_router(state: AppState) -> Router<AppState> {
         .route("/api/database", get(routes::database::info))
         .route("/api/database/link", post(routes::database::link))
         .route("/api/database/new", post(routes::database::new_database))
+        .route("/api/database/duplicate", post(routes::database::duplicate))
         .route("/api/database/load-demo", post(routes::database::load_demo))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_admin))
 }
@@ -217,7 +218,12 @@ pub async fn run() -> Result<()> {
         None => config::sqlite_url_for(&config::resolved_db_path()),
     };
 
-    let pool = db::init_pool(&db_url).await?;
+    // Read the SQLCipher password from the config (if any). When set, the pool
+    // is opened with PRAGMA key — the file is AES-256 encrypted on disk.
+    let cfg = config::read_config();
+    let db_key = cfg.db_password.as_deref();
+
+    let pool = db::init_pool_with_key(&db_url, db_key).await?;
     db::run_migrations(&pool).await?;
     // If an admin asked to "load demo data" (sets a one-shot app_meta flag),
     // apply the bundled demo dataset now — but only into an empty database.

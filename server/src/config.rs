@@ -30,6 +30,21 @@ pub struct AppConfig {
     /// built-in default (see [`default_db_path`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db_path: Option<String>,
+
+    /// The SQLCipher password for the database at `db_path`. Stored in the
+    /// config so the user only enters it ONCE (when linking/creating the DB);
+    /// OptiCore then remembers it and opens the DB transparently on every
+    /// launch.
+    ///
+    /// SECURITY MODEL: this protects against the "wrong recipient" case —
+    /// someone who receives just the .db file (e.g. by email) cannot read it
+    /// without this password. The password lives in the config file, which
+    /// stays on the clinic PC; it is NOT sent with the database when the
+    /// database is copied/emailed. So the protection holds for the stated
+    /// threat model. (It is not a defence against an attacker who has full
+    /// access to the clinic PC itself — that's a physical-security matter.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_password: Option<String>,
 }
 
 /// Where OptiCore keeps per-user, writable data.
@@ -85,15 +100,28 @@ pub fn read_config() -> AppConfig {
 }
 
 /// Persist the chosen database path into `opticore.config.json`, creating the
-/// data dir if needed. The path is stored with forward slashes.
+/// data dir if needed. The path is stored with forward slashes. Preserves any
+/// existing `db_password` already in the config.
 pub fn write_db_path(db_path: &Path) -> std::io::Result<()> {
-    let dir = data_dir();
-    std::fs::create_dir_all(&dir)?;
+    let mut cfg = read_config();
+    cfg.db_path = Some(to_forward_slashes(db_path));
+    write_config(&cfg)
+}
+
+/// Persist both the database path and its SQLCipher password.
+pub fn write_db_path_and_password(db_path: &Path, password: Option<&str>) -> std::io::Result<()> {
     let cfg = AppConfig {
         db_path: Some(to_forward_slashes(db_path)),
+        db_password: password.map(|s| s.to_string()),
     };
-    let json = serde_json::to_string_pretty(&cfg)
-        .unwrap_or_else(|_| "{}".to_string());
+    write_config(&cfg)
+}
+
+/// Write the full config to disk (creates the data dir if needed).
+fn write_config(cfg: &AppConfig) -> std::io::Result<()> {
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(cfg).unwrap_or_else(|_| "{}".to_string());
     std::fs::write(config_path(), json)
 }
 

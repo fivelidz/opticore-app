@@ -386,7 +386,11 @@ export interface DatabaseRestart {
 }
 export const database = {
   info: () => api.get<DatabaseInfo>("/database"),
-  link: (path: string) => api.post<DatabaseRestart>("/database/link", { path }),
-  create: (path: string) => api.post<DatabaseRestart>("/database/new", { path }),
+  link: (path: string, password?: string) =>
+    api.post<DatabaseRestart>("/database/link", { path, password }),
+  create: (path: string, password: string) =>
+    api.post<DatabaseRestart>("/database/new", { path, password }),
+  duplicate: (sourcePath: string, destPath: string, password?: string) =>
+    api.post<DatabaseRestart>("/database/duplicate", { source_path: sourcePath, dest_path: destPath, password }),
   loadDemo: () => api.post<DatabaseRestart>("/database/load-demo"),
 };

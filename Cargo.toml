@@ -3,7 +3,7 @@ members = ["server", "shared", "tauri-app"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 authors = ["Mosman Dry Eye Clinic <info@mymosmaneyecare.com.au>"]
 license = "Proprietary"
@@ -19,6 +19,10 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "macros", "migrate"] }
+# Pull libsqlite3-sys with SQLCipher support. This makes the SQLite that sqlx
+# bundles be SQLCipher (AES-256 page-level encryption) instead of plain SQLite.
+# The vendored-openssl feature bundles OpenSSL too, so no system deps needed.
+libsqlite3-sys = { version = "0.30", features = ["bundled-sqlcipher-vendored-openssl"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "1"
