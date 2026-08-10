@@ -1,6 +1,7 @@
 //! OptiCore server library — exposes run() so the Tauri app can embed the server.
 
 pub mod auth;
+pub mod config;
 pub mod db;
 pub mod error;
 pub mod routes;
@@ -113,6 +114,10 @@ fn admin_router(state: AppState) -> Router<AppState> {
         .route("/api/data/export", post(routes::data_io::export_data))
         .route("/api/data/import", post(routes::data_io::import_data))
         .route("/api/data/version", get(routes::data_io::version_info))
+        .route("/api/database", get(routes::database::info))
+        .route("/api/database/link", post(routes::database::link))
+        .route("/api/database/new", post(routes::database::new_database))
+        .route("/api/database/load-demo", post(routes::database::load_demo))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_admin))
 }
 
@@ -197,12 +202,26 @@ pub async fn run() -> Result<()> {
         )
         .init();
 
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "sqlite://opticore.db?mode=rwc".to_string()
-    });
+    // The Tauri shell sets DATABASE_URL from the portable config file
+    // (opticore.config.json). When running the standalone server binary with no
+    // DATABASE_URL, honour that same config so the CLI server and the desktop
+    // app open the SAME database, falling back to the default path if unset.
+    // (Treat a blank/whitespace-only DATABASE_URL the same as unset — an empty
+    // value would otherwise make SQLite connect to a junk transient database.)
+    let db_url = match std::env::var("DATABASE_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        Some(u) => u,
+        None => config::sqlite_url_for(&config::resolved_db_path()),
+    };
 
     let pool = db::init_pool(&db_url).await?;
     db::run_migrations(&pool).await?;
+    // If an admin asked to "load demo data" (sets a one-shot app_meta flag),
+    // apply the bundled demo dataset now — but only into an empty database.
+    db::maybe_force_demo_seed(&pool).await?;
     db::ensure_admin(&pool).await?;
 
     let jwt = Arc::new(auth::JwtCfg::from_env());

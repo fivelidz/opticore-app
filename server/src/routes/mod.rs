@@ -15,3 +15,4 @@ pub mod users;
 pub mod photos;
 pub mod public_api;
 pub mod data_io;
+pub mod database;

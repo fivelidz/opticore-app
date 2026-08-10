@@ -17,6 +17,15 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Restart the whole OptiCore app. Called by the frontend after the user links
+/// to a different database or creates a new one — the embedded server rebinds
+/// to the newly-configured database file on the next boot. This never deletes
+/// any data; it just re-reads `opticore.config.json` and re-opens the DB.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 /// Where to store the database — a writable per-user data directory.
 /// On Windows: %LOCALAPPDATA%\OptiCore
 /// On macOS:   ~/Library/Application Support/OptiCore
@@ -44,32 +53,80 @@ fn main() {
         env::set_var("DEV_ADMIN_PASSWORD", "admin");
     }
 
-    // OptiCore has two independent modes, each with its OWN database file so the
-    // demo and the real clinic data never touch each other:
-    //   * LIVE (production): OPTICORE_MODE=live  -> opticore.db, starts empty,
-    //       connects to online booking. This is the real clinic database.
-    //   * DEMO (default):    (unset / demo)      -> opticore-demo.db, sample data.
-    // Because they are separate files, switching between demo and live — or
-    // installing an update — never overwrites or loses the other one's data.
+    // ── DATABASE LOCATION (portable) ───────────────────────────────────────
+    //
+    // OptiCore stores the clinic database at a location the USER controls, kept
+    // in a small portable config file: <data_dir>/opticore.config.json.
+    //
+    // WHY THIS PROTECTS DATA:
+    //   * The default DB lives in the per-user data dir (%LOCALAPPDATA%\OptiCore
+    //     on Windows), which is OUTSIDE Program Files — so the MSI/NSIS
+    //     uninstaller never touches it. Data survives uninstall/reinstall.
+    //   * The user can also point the DB at any path (e.g. C:/OptiCoreData/
+    //     clinic.db, a Documents folder, or a network share) from Settings.
+    //     They back up the clinic by copying that ONE file and re-open it after
+    //     a reinstall by linking to it again — no data migration needed.
+    //
+    // There is now ONE configured database. "Demo vs live" is about the DATA in
+    // it (see the Settings "Load demo data" button + the load-demo endpoint),
+    // not about which file we open. OPTICORE_MODE is kept only as a FALLBACK for
+    // when no config file exists yet.
     let mode = env::var("OPTICORE_MODE").unwrap_or_default().to_lowercase();
     let is_live = mode == "live" || mode == "production" || mode == "final";
 
-    // Store the DB in a writable per-user data dir (Program Files is read-only).
+    // Store the DB in a writable location (Program Files is read-only).
     if env::var("DATABASE_URL").is_err() {
         let dir = data_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let db_name = if is_live { "opticore.db" } else { "opticore-demo.db" };
-        let db_path = dir.join(db_name);
 
-        // For the LIVE database, only clear seed data on the VERY FIRST creation
-        // (when the file does not yet exist). This gives a clean empty start
-        // without ever wiping real data on subsequent launches.
-        if is_live && !db_path.exists() && env::var("CLEAN_START").is_err() {
+        // 1. Config file wins: if the user has chosen a db_path, use it.
+        //    server::config reads <data_dir>/opticore.config.json and falls
+        //    back to <data_dir>/opticore.db when unset/malformed. We only treat
+        //    an EXPLICIT db_path as "configured" so the OPTICORE_MODE fallback
+        //    below still applies on a brand-new install with no config yet.
+        let cfg = server::config::read_config();
+        let configured = cfg.db_path.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        let db_path = match configured {
+            Some(p) => std::path::PathBuf::from(p),
+            None => {
+                // 2. Fallback: legacy OPTICORE_MODE demo-vs-live file name.
+                let db_name = if is_live { "opticore.db" } else { "opticore-demo.db" };
+                dir.join(db_name)
+            }
+        };
+
+        // Decide whether this boot should start EMPTY (wipe the seed data the
+        // migrations always insert). CLEAN_START only ever wipes ONCE, on a
+        // brand-new file — db.rs records a marker and never wipes an existing
+        // database again, so real clinic data is never touched on later boots.
+        //
+        // We start empty when the target DB file does NOT yet exist AND either:
+        //   * a db_path is configured (the user picked "Start a new empty
+        //     database…" — its file won't exist yet, so this is a fresh empty
+        //     DB), OR
+        //   * no config yet and we're in the legacy LIVE fallback.
+        //
+        // When a configured file ALREADY EXISTS (the user linked to existing
+        // data, e.g. after reinstalling), we never set CLEAN_START — that data
+        // is authoritative and must be preserved untouched.
+        let file_is_new = !db_path.exists();
+        let want_empty = file_is_new && (configured.is_some() || is_live);
+        if want_empty && env::var("CLEAN_START").is_err() {
             env::set_var("CLEAN_START", "1");
         }
 
-        // Use forward slashes for the sqlite URL (works on Windows too).
-        let url = format!("sqlite://{}?mode=rwc", db_path.display().to_string().replace('\\', "/"));
+        // Make sure the parent dir of a configured path exists (SQLite creates
+        // the file itself via mode=rwc, but not the directory).
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        // Forward slashes for the sqlite URL (valid on Windows too).
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            db_path.display().to_string().replace('\\', "/")
+        );
         env::set_var("DATABASE_URL", url);
     }
 
@@ -111,7 +168,8 @@ fn main() {
 
     // ---- Open the Tauri window ----
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_version])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![app_version, restart_app])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

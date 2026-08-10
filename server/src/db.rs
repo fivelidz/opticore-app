@@ -106,6 +106,73 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+// The bundled demo-seed SQL, embedded at compile time. These are the SAME three
+// migration files that populate a demo database on a normal boot; we re-use them
+// verbatim so the "Load demo data" button produces an identical dataset.
+//
+//   * 0002 inserts the base 5 patients (INSERT OR IGNORE, so ids 1..5 exist),
+//     plus their upcoming appointments and blocked times.
+//   * 0011 adds completed/past appointments (guarded on patient id=1 existing).
+//   * 0017 adds the rich 18-patient dataset with clinical/billing history
+//     (guarded on patient id=1 existing and on the demo sentinel not existing).
+//
+// Because 0002 establishes patient id=1 first, running these three in order
+// against an empty DB reproduces the full demo dataset. All three are idempotent
+// (INSERT OR IGNORE / NOT EXISTS guards), so re-running is harmless.
+const DEMO_SEED_0002: &str = include_str!("../migrations/0002_seed.sql");
+const DEMO_SEED_0011: &str = include_str!("../migrations/0011_demo_past_appointments.sql");
+const DEMO_SEED_0017: &str = include_str!("../migrations/0017_demo_rich_dataset.sql");
+
+/// On boot, if the `force_demo_seed` flag was set (by the
+/// `POST /api/database/load-demo` endpoint) AND the database currently has 0
+/// patients, load the bundled demo dataset, then clear the flag.
+///
+/// Guarding on "0 patients" means this can NEVER inject demo rows into a real
+/// clinic database: if any real patient exists the seed is skipped and the flag
+/// is cleared, so a stale flag can't lie in wait to corrupt real data later.
+pub async fn maybe_force_demo_seed(pool: &SqlitePool) -> Result<()> {
+    let flag_set: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM app_meta WHERE key = 'force_demo_seed'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
+        > 0;
+    if !flag_set {
+        return Ok(());
+    }
+
+    let patient_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM patients")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+    if patient_count == 0 {
+        info!("🌱 force_demo_seed: loading sample demo data into empty database...");
+        // Run the three seed files in order. `raw_sql` executes multi-statement
+        // scripts (each file contains several INSERTs).
+        for (name, sql) in [
+            ("0002_seed", DEMO_SEED_0002),
+            ("0011_demo_past_appointments", DEMO_SEED_0011),
+            ("0017_demo_rich_dataset", DEMO_SEED_0017),
+        ] {
+            sqlx::raw_sql(sql)
+                .execute(pool)
+                .await
+                .map_err(|e| anyhow!("demo seed {name}: {e}"))?;
+        }
+        info!("✓ demo data loaded");
+    } else {
+        info!("force_demo_seed ignored — database already has patients; real data preserved.");
+    }
+
+    // Clear the one-shot flag either way so it never fires again.
+    sqlx::query("DELETE FROM app_meta WHERE key = 'force_demo_seed'")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// On first boot, create an admin user with a randomly-generated password and
 /// print it to the log. Never hardcode credentials (fixes opticore A4/A5/B1).
 ///

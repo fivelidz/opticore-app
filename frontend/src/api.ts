@@ -369,3 +369,24 @@ export const bookingSettings = {
   approve: (id: number) => api.post(`/intake/${id}/approve`),
   decline: (id: number) => api.post(`/intake/${id}/decline`),
 };
+
+// ---------- Database location (portability) ----------
+
+export interface DatabaseInfo {
+  current_path: string;
+  file_exists: boolean;
+  file_size_bytes: number;
+  patient_count: number;
+  is_demo_seeded: boolean;
+  config_path: string;
+}
+export interface DatabaseRestart {
+  ok: boolean;
+  restart_required: boolean;
+}
+export const database = {
+  info: () => api.get<DatabaseInfo>("/database"),
+  link: (path: string) => api.post<DatabaseRestart>("/database/link", { path }),
+  create: (path: string) => api.post<DatabaseRestart>("/database/new", { path }),
+  loadDemo: () => api.post<DatabaseRestart>("/database/load-demo"),
+};
